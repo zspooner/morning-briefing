@@ -12,11 +12,42 @@ NEWS_API_KEY = os.getenv("NEWS_API_KEY")
 RESEND_API_KEY = os.getenv("RESEND_API_KEY")
 EMAIL_TO = os.getenv("EMAIL_TO")
 
+# NYC coordinates for weather
+NYC_LAT = 40.7128
+NYC_LON = -74.0060
+
 # Portfolio holdings
 MY_HOLDINGS = [
     "SPY", "QQQ", "NVDA", "PLTR", "HOOD", "GOOG", "SOFI",
     "META", "TSLA", "NBIS", "ASTS", "GRAB", "HIMS"
 ]
+
+
+def get_nyc_weather() -> dict:
+    """Get NYC high/low temperature for today using Open-Meteo (free, no API key)."""
+    try:
+        resp = requests.get(
+            "https://api.open-meteo.com/v1/forecast",
+            params={
+                "latitude": NYC_LAT,
+                "longitude": NYC_LON,
+                "daily": "temperature_2m_max,temperature_2m_min",
+                "temperature_unit": "fahrenheit",
+                "timezone": "America/New_York",
+                "forecast_days": 1
+            },
+            timeout=10
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            daily = data.get("daily", {})
+            return {
+                "high": round(daily.get("temperature_2m_max", [None])[0]),
+                "low": round(daily.get("temperature_2m_min", [None])[0])
+            }
+    except Exception:
+        pass
+    return {}
 
 
 def get_market_overview() -> dict:
@@ -129,11 +160,11 @@ def get_ai_news() -> list:
 def generate_business_ideas() -> list:
     """Generate 5 business ideas using Groq API with Llama."""
     fallback_ideas = [
-        "Chrome extension that auto-generates LinkedIn posts from articles you read",
-        "SaaS dashboard for restaurants to manage delivery app orders in one place",
-        "Mobile app connecting pet owners with local sitters for same-day booking",
-        "Weekly newsletter summarizing AI research papers for developers",
-        "Marketplace for Notion power users to sell templates and automations"
+        "Zapier for Etsy sellers: auto-reply to buyer messages and sync inventory to spreadsheets",
+        "AI that writes Airbnb listing descriptions from your property photos in 30 seconds",
+        "Slack bot that summarizes long threads for managers who hate reading channels",
+        "Browser extension for recruiters that auto-drafts personalized LinkedIn outreach",
+        "API that converts podcast episodes into tweet threads for content creators"
     ]
 
     if not GROQ_API_KEY:
@@ -141,7 +172,19 @@ def generate_business_ideas() -> list:
 
     try:
         today = datetime.now().strftime("%B %d, %Y")
-        prompt = f"""Generate 5 startup ideas for {today}. Each should be specific, actionable, 10-15 words. Mix weekend projects and bigger opportunities. Tied to AI, remote work, creator economy, health tech. Return ONLY 5 numbered lines."""
+        prompt = f"""You are a startup idea generator for a technical founder. Generate 5 hyper-specific, niche business ideas for {today}.
+
+Requirements:
+- Each idea must target a SPECIFIC audience (e.g., "dentists", "Airbnb hosts", "Etsy sellers", not "small businesses")
+- Include the business model (SaaS, marketplace, API, Chrome extension, mobile app)
+- Ideas should solve a real pain point you could validate this week
+- Mix: 2 weekend builds, 2 medium projects, 1 ambitious idea
+- 15-20 words each, detailed enough to start building tomorrow
+
+BAD example: "AI tool for businesses" (too vague)
+GOOD example: "Chrome extension that auto-generates product descriptions for Etsy sellers using their photos"
+
+Return ONLY 5 numbered lines. No intro."""
 
         resp = requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
@@ -173,10 +216,16 @@ def format_html_briefing() -> str:
     now = datetime.now(et)
     date_str = now.strftime("%A, %B %d")
 
+    weather = get_nyc_weather()
     market = get_market_overview()
     ai_news = get_ai_news()
     portfolio_news = get_portfolio_news()
     ideas = generate_business_ideas()
+
+    # Weather string
+    weather_str = ""
+    if weather.get("high") and weather.get("low"):
+        weather_str = f'<span style="color:#6b7280;font-size:14px;margin-left:12px">NYC: {weather["high"]}°/{weather["low"]}°F</span>'
 
     # Build market section
     market_rows = ""
@@ -236,7 +285,7 @@ def format_html_briefing() -> str:
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
 <body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:500px;margin:0 auto;padding:20px;background:#f9fafb">
   <div style="background:white;border-radius:12px;padding:24px;box-shadow:0 1px 3px rgba(0,0,0,0.1)">
-    <h1 style="margin:0 0 20px 0;font-size:20px;color:#111">☀️ {date_str}</h1>
+    <h1 style="margin:0 0 20px 0;font-size:20px;color:#111">☀️ {date_str}{weather_str}</h1>
 
     <div style="margin-bottom:20px">
       <h2 style="margin:0 0 10px 0;font-size:14px;color:#6b7280;text-transform:uppercase;letter-spacing:0.5px">Markets</h2>

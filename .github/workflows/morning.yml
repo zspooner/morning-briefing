@@ -2,8 +2,8 @@ name: Morning Briefing
 
 on:
   schedule:
-    # 8:30 AM ET = 13:30 UTC (or 12:30 UTC during DST)
-    - cron: '30 13 * * *'
+    # 8:00 AM ET = 13:00 UTC (or 12:00 UTC during DST)
+    - cron: '0 13 * * *'
   workflow_dispatch:
 
 jobs:
