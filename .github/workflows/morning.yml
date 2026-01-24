@@ -2,14 +2,13 @@ name: Morning Briefing
 
 on:
   schedule:
-    # 9:00 AM ET = 14:00 UTC (or 13:00 UTC during DST)
-    - cron: '0 14 * * *'
-  workflow_dispatch:  # Allow manual trigger
+    # 8:30 AM ET = 13:30 UTC (or 12:30 UTC during DST)
+    - cron: '30 13 * * *'
+  workflow_dispatch:
 
 jobs:
   briefing:
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
 
@@ -19,12 +18,12 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: |
-          pip install -r requirements.txt
+        run: pip install -r requirements.txt
 
       - name: Send morning briefing
         env:
           NEWS_API_KEY: ${{ secrets.NEWS_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-        run: |
-          python briefing.py --send
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+        run: python briefing.py --send

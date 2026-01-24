@@ -6,17 +6,13 @@ import requests
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-# Groq API for open source LLM (Llama)
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-
-# ntfy configuration
-NTFY_TOPIC = os.getenv("NTFY_TOPIC", "zack-briefing")
-NTFY_URL = f"https://ntfy.sh/{NTFY_TOPIC}"
-
 # API Keys
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 NEWS_API_KEY = os.getenv("NEWS_API_KEY")
+RESEND_API_KEY = os.getenv("RESEND_API_KEY")
+EMAIL_TO = os.getenv("EMAIL_TO")
 
-# Portfolio holdings (hardcoded for now)
+# Portfolio holdings
 MY_HOLDINGS = [
     "SPY", "QQQ", "NVDA", "PLTR", "HOOD", "GOOG", "SOFI",
     "META", "TSLA", "NBIS", "ASTS", "GRAB", "HIMS"
@@ -24,21 +20,12 @@ MY_HOLDINGS = [
 
 
 def get_market_overview() -> dict:
-    """Fetch market futures and key economic events."""
+    """Fetch market data and key economic events."""
     import yfinance as yf
 
-    result = {
-        "futures": {},
-        "events": [],
-        "headlines": []
-    }
+    result = {"futures": {}, "events": [], "headlines": []}
 
-    # Get futures/pre-market data for major indices
-    indices = {
-        "S&P 500": "^GSPC",
-        "Nasdaq": "^IXIC",
-        "Dow": "^DJI"
-    }
+    indices = {"S&P 500": "^GSPC", "Nasdaq": "^IXIC", "Dow": "^DJI"}
 
     for name, ticker in indices.items():
         try:
@@ -50,29 +37,20 @@ def get_market_overview() -> dict:
         except Exception:
             pass
 
-    # Get top market headlines from News API
     if NEWS_API_KEY:
         try:
-            url = "https://newsapi.org/v2/top-headlines"
-            params = {
-                "apiKey": NEWS_API_KEY,
-                "category": "business",
-                "country": "us",
-                "pageSize": 5
-            }
-            resp = requests.get(url, params=params, timeout=10)
+            resp = requests.get(
+                "https://newsapi.org/v2/top-headlines",
+                params={"apiKey": NEWS_API_KEY, "category": "business", "country": "us", "pageSize": 5},
+                timeout=10
+            )
             if resp.status_code == 200:
                 articles = resp.json().get("articles", [])
-                result["headlines"] = [
-                    a.get("title", "").split(" - ")[0]  # Remove source suffix
-                    for a in articles[:3]
-                    if a.get("title")
-                ]
+                result["headlines"] = [a.get("title", "").split(" - ")[0] for a in articles[:3] if a.get("title")]
         except Exception:
             pass
 
-    # Key events (Fed, earnings) - check financial calendars
-    # For now, we'll use yfinance to check major earnings
+    # Check for major earnings today
     major_tickers = ["AAPL", "MSFT", "GOOGL", "AMZN", "TSLA", "META", "NVDA"]
     today = datetime.now()
 
@@ -102,43 +80,27 @@ def get_portfolio_news() -> list:
 
     news_items = []
     yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-
-    # Skip ETFs, focus on individual stocks
     stocks_to_check = [s for s in MY_HOLDINGS if s not in ["SPY", "QQQ"]]
 
     for symbol in stocks_to_check[:10]:
         try:
-            url = "https://newsapi.org/v2/everything"
-            params = {
-                "apiKey": NEWS_API_KEY,
-                "q": f"{symbol} stock",
-                "from": yesterday,
-                "sortBy": "relevancy",
-                "pageSize": 3,
-                "language": "en"
-            }
-            resp = requests.get(url, params=params, timeout=10)
-
+            resp = requests.get(
+                "https://newsapi.org/v2/everything",
+                params={"apiKey": NEWS_API_KEY, "q": f"{symbol} stock", "from": yesterday, "sortBy": "relevancy", "pageSize": 3, "language": "en"},
+                timeout=10
+            )
             if resp.status_code == 200:
                 articles = resp.json().get("articles", [])
-
-                # Flag important news (earnings, analyst, SEC)
                 important_keywords = ["earnings", "upgrade", "downgrade", "analyst", "SEC", "FDA", "lawsuit", "acquire"]
 
                 for article in articles[:2]:
                     title = article.get("title", "")
                     is_important = any(kw.lower() in title.lower() for kw in important_keywords)
-
                     if title:
-                        news_items.append({
-                            "symbol": symbol,
-                            "title": title.split(" - ")[0],  # Remove source
-                            "important": is_important
-                        })
+                        news_items.append({"symbol": symbol, "title": title.split(" - ")[0], "important": is_important})
         except Exception:
             pass
 
-    # Sort important news first
     news_items.sort(key=lambda x: x["important"], reverse=True)
     return news_items[:8]
 
@@ -149,39 +111,28 @@ def get_ai_news() -> list:
         return []
 
     try:
-        url = "https://newsapi.org/v2/everything"
         yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-        params = {
-            "apiKey": NEWS_API_KEY,
-            "q": "artificial intelligence OR OpenAI OR ChatGPT OR LLM OR machine learning",
-            "from": yesterday,
-            "sortBy": "relevancy",
-            "pageSize": 5,
-            "language": "en"
-        }
-        resp = requests.get(url, params=params, timeout=10)
-
+        resp = requests.get(
+            "https://newsapi.org/v2/everything",
+            params={"apiKey": NEWS_API_KEY, "q": "artificial intelligence OR OpenAI OR ChatGPT OR LLM", "from": yesterday, "sortBy": "relevancy", "pageSize": 5, "language": "en"},
+            timeout=10
+        )
         if resp.status_code == 200:
             articles = resp.json().get("articles", [])
-            return [
-                a.get("title", "").split(" - ")[0]
-                for a in articles[:2]
-                if a.get("title")
-            ]
+            return [a.get("title", "").split(" - ")[0] for a in articles[:2] if a.get("title")]
     except Exception:
         pass
-
     return []
 
 
 def generate_business_ideas() -> list:
     """Generate 5 business ideas using Groq API with Llama."""
     fallback_ideas = [
-        "Build an AI-powered code review tool for small teams",
-        "Create a subscription box for productivity tools",
-        "Develop a mobile app for tracking personal finances",
-        "Start a newsletter aggregating startup funding news",
-        "Build a marketplace for freelance AI prompt engineers"
+        "Chrome extension that auto-generates LinkedIn posts from articles you read",
+        "SaaS dashboard for restaurants to manage delivery app orders in one place",
+        "Mobile app connecting pet owners with local sitters for same-day booking",
+        "Weekly newsletter summarizing AI research papers for developers",
+        "Marketplace for Notion power users to sell templates and automations"
     ]
 
     if not GROQ_API_KEY:
@@ -189,172 +140,193 @@ def generate_business_ideas() -> list:
 
     try:
         today = datetime.now().strftime("%B %d, %Y")
-
-        prompt = f"""Generate exactly 5 startup/side project ideas for {today}.
-
-Requirements:
-- Specific and actionable (not vague like "AI tool")
-- Mix of weekend projects and bigger SaaS opportunities
-- Tied to current trends: AI agents, remote work, creator economy, health tech
-- Realistic for a solo developer or small team to build
-- Each idea should be 10-15 words, descriptive enough to understand the product
-
-Return ONLY 5 numbered lines. No intro, no explanation.
-
-1. Chrome extension that uses AI to auto-generate LinkedIn posts from articles you read
-2. SaaS dashboard for small restaurants to manage DoorDash/UberEats orders in one place
-3. Mobile app connecting pet owners with verified local pet sitters for same-day booking
-4. Weekly newsletter curating the best AI research papers, summarized for developers
-5. Marketplace where Notion power users sell custom templates and automations"""
+        prompt = f"""Generate 5 startup ideas for {today}. Each should be specific, actionable, 10-15 words. Mix weekend projects and bigger opportunities. Tied to AI, remote work, creator economy, health tech. Return ONLY 5 numbered lines."""
 
         resp = requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {GROQ_API_KEY}",
-                "Content-Type": "application/json"
-            },
-            json={
-                "model": "llama-3.3-70b-versatile",
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 300,
-                "temperature": 0.8
-            },
+            headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+            json={"model": "llama-3.3-70b-versatile", "messages": [{"role": "user", "content": prompt}], "max_tokens": 300, "temperature": 0.8},
             timeout=30
         )
 
         if resp.status_code == 200:
             response_text = resp.json()["choices"][0]["message"]["content"]
             ideas = []
-
             for line in response_text.strip().split("\n"):
                 line = line.strip()
                 if line and line[0].isdigit():
-                    # Remove number prefix
                     idea = line.lstrip("0123456789.").strip()
                     if idea:
                         ideas.append(idea)
-
             return ideas[:5] if ideas else fallback_ideas
-        else:
-            print(f"Groq API error: {resp.status_code}")
-            return fallback_ideas
 
     except Exception as e:
-        print(f"Groq API error: {e}")
-        return fallback_ideas
+        print(f"Groq error: {e}")
+
+    return fallback_ideas
 
 
-def format_briefing() -> str:
-    """Build the complete morning briefing."""
-    lines = []
-
-    # Header
+def format_html_briefing() -> str:
+    """Build HTML email briefing."""
     et = ZoneInfo("America/New_York")
     now = datetime.now(et)
-    lines.append(now.strftime("%A, %B %d").upper())
-    lines.append("")
+    date_str = now.strftime("%A, %B %d")
 
-    # Market Overview
     market = get_market_overview()
-
-    lines.append("MARKETS")
-    if market["futures"]:
-        for name, pct in market["futures"].items():
-            arrow = "▲" if pct >= 0 else "▼"
-            lines.append(f"  {name}: {arrow} {abs(pct):.1f}%")
-
-    if market["events"]:
-        lines.append(f"  Today: {', '.join(market['events'][:2])}")
-
-    lines.append("")
-
-    # AI News
-    lines.append("AI NEWS")
     ai_news = get_ai_news()
-    if ai_news:
-        for headline in ai_news[:2]:
-            if len(headline) > 55:
-                headline = headline[:52] + "..."
-            lines.append(f"  • {headline}")
-    else:
-        lines.append("  No major updates")
-
-    lines.append("")
-
-    # Portfolio Watch
-    lines.append("YOUR STOCKS")
-    news = get_portfolio_news()
-
-    if news:
-        seen_symbols = set()
-        for item in news:
-            if item["symbol"] not in seen_symbols:
-                flag = "!" if item["important"] else " "
-                title = item["title"]
-                if len(title) > 45:
-                    title = title[:42] + "..."
-                lines.append(f" {flag}{item['symbol']}: {title}")
-                seen_symbols.add(item["symbol"])
-                if len(seen_symbols) >= 4:
-                    break
-    else:
-        lines.append("  No significant news")
-
-    lines.append("")
-
-    # Business Ideas
-    lines.append("IDEAS")
+    portfolio_news = get_portfolio_news()
     ideas = generate_business_ideas()
+
+    # Build market section
+    market_rows = ""
+    for name, pct in market.get("futures", {}).items():
+        color = "#22c55e" if pct >= 0 else "#ef4444"
+        arrow = "▲" if pct >= 0 else "▼"
+        market_rows += f'<tr><td style="padding:4px 12px 4px 0;color:#666">{name}</td><td style="color:{color};font-weight:600">{arrow} {abs(pct):.1f}%</td></tr>'
+
+    events_html = ""
+    if market.get("events"):
+        events_html = f'<p style="margin:8px 0 0 0;color:#666;font-size:13px">📅 {", ".join(market["events"][:2])}</p>'
+
+    # AI news section
+    ai_html = ""
+    for headline in ai_news[:2]:
+        if len(headline) > 70:
+            headline = headline[:67] + "..."
+        ai_html += f'<li style="margin-bottom:6px;color:#374151">{headline}</li>'
+    if not ai_html:
+        ai_html = '<li style="color:#9ca3af">No major AI news today</li>'
+
+    # Portfolio section
+    portfolio_html = ""
+    seen = set()
+    for item in portfolio_news:
+        if item["symbol"] not in seen:
+            title = item["title"]
+            if len(title) > 50:
+                title = title[:47] + "..."
+            flag = "🔔 " if item["important"] else ""
+            portfolio_html += f'<li style="margin-bottom:6px"><strong>{item["symbol"]}</strong>: {flag}{title}</li>'
+            seen.add(item["symbol"])
+            if len(seen) >= 4:
+                break
+    if not portfolio_html:
+        portfolio_html = '<li style="color:#9ca3af">No significant news for your holdings</li>'
+
+    # Ideas section
+    ideas_html = ""
     for i, idea in enumerate(ideas, 1):
-        if len(idea) > 60:
-            idea = idea[:57] + "..."
-        lines.append(f"  {i}. {idea}")
+        if len(idea) > 70:
+            idea = idea[:67] + "..."
+        ideas_html += f'<li style="margin-bottom:6px">{idea}</li>'
 
-    return "\n".join(lines)
+    html = f"""
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:500px;margin:0 auto;padding:20px;background:#f9fafb">
+  <div style="background:white;border-radius:12px;padding:24px;box-shadow:0 1px 3px rgba(0,0,0,0.1)">
+    <h1 style="margin:0 0 20px 0;font-size:20px;color:#111">☀️ {date_str}</h1>
+
+    <div style="margin-bottom:20px">
+      <h2 style="margin:0 0 10px 0;font-size:14px;color:#6b7280;text-transform:uppercase;letter-spacing:0.5px">Markets</h2>
+      <table style="font-size:15px">{market_rows}</table>
+      {events_html}
+    </div>
+
+    <div style="margin-bottom:20px">
+      <h2 style="margin:0 0 10px 0;font-size:14px;color:#6b7280;text-transform:uppercase;letter-spacing:0.5px">🤖 AI News</h2>
+      <ul style="margin:0;padding-left:20px;font-size:14px">{ai_html}</ul>
+    </div>
+
+    <div style="margin-bottom:20px">
+      <h2 style="margin:0 0 10px 0;font-size:14px;color:#6b7280;text-transform:uppercase;letter-spacing:0.5px">📊 Your Stocks</h2>
+      <ul style="margin:0;padding-left:20px;font-size:14px">{portfolio_html}</ul>
+    </div>
+
+    <div>
+      <h2 style="margin:0 0 10px 0;font-size:14px;color:#6b7280;text-transform:uppercase;letter-spacing:0.5px">💡 Ideas</h2>
+      <ol style="margin:0;padding-left:20px;font-size:14px">{ideas_html}</ol>
+    </div>
+  </div>
+  <p style="text-align:center;color:#9ca3af;font-size:12px;margin-top:16px">Delivered by Morning Briefing Bot</p>
+</body>
+</html>
+"""
+    return html
 
 
-def send_ntfy(message: str, title: str = "Morning Briefing"):
-    """Send notification via ntfy.sh."""
+def send_email(html: str, subject: str):
+    """Send email via Resend API."""
+    if not RESEND_API_KEY or not EMAIL_TO:
+        print("❌ Missing RESEND_API_KEY or EMAIL_TO")
+        return False
+
     try:
-        # Post to base URL with JSON body for proper unicode handling
         resp = requests.post(
-            "https://ntfy.sh",
+            "https://api.resend.com/emails",
+            headers={"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"},
             json={
-                "topic": NTFY_TOPIC,
-                "title": title,
-                "message": message,
-                "tags": ["coffee", "chart_with_upwards_trend"]
+                "from": "Morning Briefing <onboarding@resend.dev>",
+                "to": [EMAIL_TO],
+                "subject": subject,
+                "html": html
             },
-            timeout=10
+            timeout=15
         )
-        resp.raise_for_status()
-        print(f"✅ Notification sent to {NTFY_TOPIC}")
-        return True
+
+        if resp.status_code == 200:
+            print(f"✅ Email sent to {EMAIL_TO}")
+            return True
+        else:
+            print(f"❌ Resend error: {resp.status_code} - {resp.text}")
+            return False
+
     except Exception as e:
-        print(f"❌ Failed to send notification: {e}")
+        print(f"❌ Email error: {e}")
         return False
 
 
 def main():
     parser = argparse.ArgumentParser(description="Morning Briefing Bot")
     parser.add_argument("--test", action="store_true", help="Print briefing without sending")
-    parser.add_argument("--send", action="store_true", help="Send briefing via ntfy")
+    parser.add_argument("--send", action="store_true", help="Send briefing via email")
     args = parser.parse_args()
 
     print("☀️ Building morning briefing...\n")
-    briefing = format_briefing()
 
     if args.test or not args.send:
+        # Show text preview
+        market = get_market_overview()
+        ai_news = get_ai_news()
+        portfolio_news = get_portfolio_news()
+        ideas = generate_business_ideas()
+
         print("=" * 50)
-        print(briefing)
+        print("MARKETS")
+        for name, pct in market.get("futures", {}).items():
+            arrow = "▲" if pct >= 0 else "▼"
+            print(f"  {name}: {arrow} {abs(pct):.1f}%")
+        print("\nAI NEWS")
+        for h in ai_news[:2]:
+            print(f"  • {h[:60]}...")
+        print("\nYOUR STOCKS")
+        seen = set()
+        for item in portfolio_news[:4]:
+            if item["symbol"] not in seen:
+                print(f"  {item['symbol']}: {item['title'][:45]}...")
+                seen.add(item["symbol"])
+        print("\nIDEAS")
+        for i, idea in enumerate(ideas, 1):
+            print(f"  {i}. {idea[:60]}...")
         print("=" * 50)
-        print(f"\nCharacters: {len(briefing)}")
 
     if args.send:
         et = ZoneInfo("America/New_York")
         now = datetime.now(et)
-        title = f"☀️ Morning Briefing - {now.strftime('%b %d')}"
-        send_ntfy(briefing, title)
+        subject = f"☀️ Morning Briefing - {now.strftime('%b %d')}"
+        html = format_html_briefing()
+        send_email(html, subject)
 
 
 if __name__ == "__main__":
