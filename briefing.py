@@ -148,21 +148,39 @@ def get_portfolio_news() -> list:
     return news_items[:8]
 
 
-def get_ai_news() -> list:
-    """Get latest AI development headlines."""
+def get_dev_tools_news() -> list:
+    """Get latest developer tools and AI coding news."""
     if not NEWS_API_KEY:
         return []
 
     try:
         yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        # Focus on developer tools, coding assistants, automation
         resp = requests.get(
             "https://newsapi.org/v2/everything",
-            params={"apiKey": NEWS_API_KEY, "q": "artificial intelligence OR OpenAI OR ChatGPT OR LLM", "from": yesterday, "sortBy": "relevancy", "pageSize": 5, "language": "en"},
+            params={
+                "apiKey": NEWS_API_KEY,
+                "q": "(Cursor OR \"GitHub Copilot\" OR \"Claude Code\" OR Replit OR Vercel OR Supabase OR \"VS Code\" OR \"coding assistant\") AND (launch OR release OR update OR new)",
+                "from": yesterday,
+                "sortBy": "relevancy",
+                "pageSize": 10,
+                "language": "en"
+            },
             timeout=10
         )
         if resp.status_code == 200:
             articles = resp.json().get("articles", [])
-            return [{"title": a.get("title", "").split(" - ")[0], "url": a.get("url", "")} for a in articles[:2] if a.get("title")]
+            # Filter out generic articles
+            filtered = []
+            for a in articles:
+                title = a.get("title", "")
+                # Skip generic news
+                if any(skip in title.lower() for skip in ["stock", "shares", "investor", "earnings", "market"]):
+                    continue
+                filtered.append({"title": title.split(" - ")[0], "url": a.get("url", "")})
+                if len(filtered) >= 2:
+                    break
+            return filtered
     except Exception:
         pass
     return []
@@ -229,7 +247,7 @@ def format_html_briefing() -> str:
 
     weather = get_nyc_weather()
     market = get_market_overview()
-    ai_news = get_ai_news()
+    dev_news = get_dev_tools_news()
     portfolio_news = get_portfolio_news()
     ideas = generate_business_ideas()
 
@@ -257,19 +275,19 @@ def format_html_briefing() -> str:
     if market.get("events"):
         events_html = f'<p style="margin:8px 0 0 0;color:#666;font-size:13px">📅 {", ".join(market["events"][:2])}</p>'
 
-    # AI news section
-    ai_html = ""
-    for item in ai_news[:2]:
+    # Dev tools news section
+    dev_html = ""
+    for item in dev_news[:2]:
         title = item["title"] if isinstance(item, dict) else item
         url = item.get("url", "") if isinstance(item, dict) else ""
         if len(title) > 70:
             title = title[:67] + "..."
         if url:
-            ai_html += f'<li style="margin-bottom:8px"><a href="{url}" style="color:#2563eb;text-decoration:none">{title}</a></li>'
+            dev_html += f'<li style="margin-bottom:8px"><a href="{url}" style="color:#2563eb;text-decoration:none">{title}</a></li>'
         else:
-            ai_html += f'<li style="margin-bottom:8px;color:#374151">{title}</li>'
-    if not ai_html:
-        ai_html = '<li style="color:#9ca3af">No major AI news today</li>'
+            dev_html += f'<li style="margin-bottom:8px;color:#374151">{title}</li>'
+    if not dev_html:
+        dev_html = '<li style="color:#9ca3af">No dev tool updates today</li>'
 
     # Portfolio section
     portfolio_html = ""
@@ -312,8 +330,8 @@ def format_html_briefing() -> str:
     </div>
 
     <div style="margin-bottom:20px">
-      <h2 style="margin:0 0 10px 0;font-size:14px;color:#6b7280;text-transform:uppercase;letter-spacing:0.5px">🤖 AI News</h2>
-      <ul style="margin:0;padding-left:20px;font-size:14px">{ai_html}</ul>
+      <h2 style="margin:0 0 10px 0;font-size:14px;color:#6b7280;text-transform:uppercase;letter-spacing:0.5px">🛠️ Dev Tools</h2>
+      <ul style="margin:0;padding-left:20px;font-size:14px">{dev_html}</ul>
     </div>
 
     <div style="margin-bottom:20px">
@@ -375,7 +393,7 @@ def main():
     if args.test or not args.send:
         # Show text preview
         market = get_market_overview()
-        ai_news = get_ai_news()
+        dev_news = get_dev_tools_news()
         portfolio_news = get_portfolio_news()
         ideas = generate_business_ideas()
 
@@ -384,9 +402,10 @@ def main():
         for name, pct in market.get("futures", {}).items():
             arrow = "▲" if pct >= 0 else "▼"
             print(f"  {name}: {arrow} {abs(pct):.1f}%")
-        print("\nAI NEWS")
-        for h in ai_news[:2]:
-            print(f"  • {h[:60]}...")
+        print("\nDEV TOOLS")
+        for item in dev_news[:2]:
+            title = item["title"] if isinstance(item, dict) else item
+            print(f"  • {title[:60]}...")
         print("\nYOUR STOCKS")
         seen = set()
         for item in portfolio_news[:4]:
