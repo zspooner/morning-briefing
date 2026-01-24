@@ -6,14 +6,6 @@ import requests
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-# Optional dependencies with graceful degradation
-WEBULL_ENABLED = False
-try:
-    from webull import webull
-    WEBULL_ENABLED = True
-except ImportError:
-    pass
-
 # Groq API for open source LLM (Llama)
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
@@ -23,10 +15,12 @@ NTFY_URL = f"https://ntfy.sh/{NTFY_TOPIC}"
 
 # API Keys
 NEWS_API_KEY = os.getenv("NEWS_API_KEY")
-WEBULL_EMAIL = os.getenv("WEBULL_EMAIL")
-WEBULL_PASSWORD = os.getenv("WEBULL_PASSWORD")
-WEBULL_DEVICE_ID = os.getenv("WEBULL_DEVICE_ID")
-WEBULL_TRADE_TOKEN = os.getenv("WEBULL_TRADE_TOKEN")
+
+# Portfolio holdings (hardcoded for now)
+MY_HOLDINGS = [
+    "SPY", "QQQ", "NVDA", "PLTR", "HOOD", "GOOG", "SOFI",
+    "META", "TSLA", "NBIS", "ASTS", "GRAB", "HIMS"
+]
 
 
 def get_market_overview() -> dict:
@@ -101,54 +95,18 @@ def get_market_overview() -> dict:
     return result
 
 
-def get_webull_holdings() -> list:
-    """Fetch current holdings from Webull account."""
-    if not WEBULL_ENABLED:
-        return []
-
-    if not all([WEBULL_EMAIL, WEBULL_PASSWORD]):
-        return []
-
-    holdings = []
-    try:
-        wb = webull()
-
-        # Login
-        wb.login(WEBULL_EMAIL, WEBULL_PASSWORD)
-
-        # Get trade token if provided
-        if WEBULL_TRADE_TOKEN:
-            wb._trade_token = WEBULL_TRADE_TOKEN
-
-        # Get positions
-        positions = wb.get_positions()
-
-        if positions:
-            for pos in positions:
-                ticker = pos.get("ticker", {}).get("symbol", "")
-                if ticker:
-                    holdings.append({
-                        "symbol": ticker,
-                        "shares": float(pos.get("position", 0)),
-                        "market_value": float(pos.get("marketValue", 0)),
-                        "cost_basis": float(pos.get("costPrice", 0))
-                    })
-    except Exception as e:
-        print(f"Webull error: {e}")
-
-    return holdings
-
-
-def get_portfolio_news(holdings: list) -> list:
+def get_portfolio_news() -> list:
     """Get news for portfolio holdings from the last 24 hours."""
-    if not NEWS_API_KEY or not holdings:
+    if not NEWS_API_KEY:
         return []
 
     news_items = []
     yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
-    for holding in holdings[:10]:  # Limit to top 10 holdings
-        symbol = holding["symbol"]
+    # Skip ETFs, focus on individual stocks
+    stocks_to_check = [s for s in MY_HOLDINGS if s not in ["SPY", "QQQ"]]
+
+    for symbol in stocks_to_check[:10]:
         try:
             url = "https://newsapi.org/v2/everything"
             params = {
@@ -182,7 +140,38 @@ def get_portfolio_news(holdings: list) -> list:
 
     # Sort important news first
     news_items.sort(key=lambda x: x["important"], reverse=True)
-    return news_items[:8]  # Return top 8 items
+    return news_items[:8]
+
+
+def get_ai_news() -> list:
+    """Get latest AI development headlines."""
+    if not NEWS_API_KEY:
+        return []
+
+    try:
+        url = "https://newsapi.org/v2/everything"
+        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+        params = {
+            "apiKey": NEWS_API_KEY,
+            "q": "artificial intelligence OR OpenAI OR ChatGPT OR LLM OR machine learning",
+            "from": yesterday,
+            "sortBy": "relevancy",
+            "pageSize": 5,
+            "language": "en"
+        }
+        resp = requests.get(url, params=params, timeout=10)
+
+        if resp.status_code == 200:
+            articles = resp.json().get("articles", [])
+            return [
+                a.get("title", "").split(" - ")[0]
+                for a in articles[:2]
+                if a.get("title")
+            ]
+    except Exception:
+        pass
+
+    return []
 
 
 def generate_business_ideas() -> list:
@@ -201,22 +190,22 @@ def generate_business_ideas() -> list:
     try:
         today = datetime.now().strftime("%B %d, %Y")
 
-        prompt = f"""Generate exactly 5 business ideas for today ({today}).
+        prompt = f"""Generate exactly 5 startup/side project ideas for {today}.
 
 Requirements:
-- Each idea should be specific and actionable
-- Mix of quick builds (weekend projects) and bigger opportunities
-- Tie ideas to current trends (AI, remote work, creator economy, sustainability)
-- Ideas should be realistic for a solo developer or small team
-- One sentence per idea, max 80 characters each
+- Specific and actionable (not vague like "AI tool")
+- Mix of weekend projects and bigger SaaS opportunities
+- Tied to current trends: AI agents, remote work, creator economy, health tech
+- Realistic for a solo developer or small team to build
+- Each idea should be 10-15 words, descriptive enough to understand the product
 
-Format: Return ONLY 5 numbered lines, nothing else.
-Example format:
-1. Build a Chrome extension that summarizes YouTube videos with AI
-2. Create a SaaS for small restaurants to manage online orders
-3. Develop an app connecting pet owners with local pet sitters
-4. Launch a newsletter curating AI research papers for developers
-5. Build a marketplace for selling Notion templates"""
+Return ONLY 5 numbered lines. No intro, no explanation.
+
+1. Chrome extension that uses AI to auto-generate LinkedIn posts from articles you read
+2. SaaS dashboard for small restaurants to manage DoorDash/UberEats orders in one place
+3. Mobile app connecting pet owners with verified local pet sitters for same-day booking
+4. Weekly newsletter curating the best AI research papers, summarized for developers
+5. Marketplace where Notion power users sell custom templates and automations"""
 
         resp = requests.post(
             "https://api.groq.com/openai/v1/chat/completions",
@@ -291,33 +280,39 @@ def format_briefing() -> str:
 
     lines.append("")
 
+    # AI News
+    lines.append("🤖 **AI News**")
+    ai_news = get_ai_news()
+    if ai_news:
+        for headline in ai_news[:2]:
+            if len(headline) > 60:
+                headline = headline[:57] + "..."
+            lines.append(f"• {headline}")
+    else:
+        lines.append("• No major AI news today")
+
+    lines.append("")
+
     # Portfolio Watch
     lines.append("📰 **Portfolio Watch**")
+    news = get_portfolio_news()
 
-    holdings = get_webull_holdings()
+    if news:
+        # Group by symbol
+        seen_symbols = set()
+        for item in news:
+            if item["symbol"] not in seen_symbols:
+                flag = "⚠️ " if item["important"] else ""
+                title = item["title"]
+                if len(title) > 50:
+                    title = title[:47] + "..."
+                lines.append(f"{flag}{item['symbol']}: {title}")
+                seen_symbols.add(item["symbol"])
 
-    if holdings:
-        news = get_portfolio_news(holdings)
-
-        if news:
-            # Group by symbol
-            seen_symbols = set()
-            for item in news:
-                if item["symbol"] not in seen_symbols:
-                    flag = "⚠️ " if item["important"] else ""
-                    title = item["title"]
-                    if len(title) > 50:
-                        title = title[:47] + "..."
-                    lines.append(f"{flag}{item['symbol']}: {title}")
-                    seen_symbols.add(item["symbol"])
-
-                    if len(seen_symbols) >= 5:
-                        break
-        else:
-            for h in holdings[:5]:
-                lines.append(f"{h['symbol']}: No significant news")
+                if len(seen_symbols) >= 5:
+                    break
     else:
-        lines.append("(Configure Webull credentials to see portfolio)")
+        lines.append("No significant news for holdings")
 
     lines.append("")
 
@@ -334,13 +329,15 @@ def format_briefing() -> str:
 def send_ntfy(message: str, title: str = "Morning Briefing"):
     """Send notification via ntfy.sh."""
     try:
+        # Use JSON body to properly handle unicode in title
         resp = requests.post(
             NTFY_URL,
-            data=message.encode("utf-8"),
-            headers={
-                "Title": title,
-                "Tags": "coffee,chart_with_upwards_trend",
-                "Markdown": "yes"
+            json={
+                "topic": NTFY_TOPIC,
+                "title": title,
+                "message": message,
+                "tags": ["coffee", "chart_with_upwards_trend"],
+                "markdown": True
             },
             timeout=10
         )
