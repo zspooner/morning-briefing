@@ -1,0 +1,35 @@
+name: Morning Briefing
+
+on:
+  schedule:
+    # 9:00 AM ET = 14:00 UTC (or 13:00 UTC during DST)
+    - cron: '0 14 * * *'
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  briefing:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Send morning briefing
+        env:
+          NEWS_API_KEY: ${{ secrets.NEWS_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          WEBULL_EMAIL: ${{ secrets.WEBULL_EMAIL }}
+          WEBULL_PASSWORD: ${{ secrets.WEBULL_PASSWORD }}
+          WEBULL_DEVICE_ID: ${{ secrets.WEBULL_DEVICE_ID }}
+          WEBULL_TRADE_TOKEN: ${{ secrets.WEBULL_TRADE_TOKEN }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: |
+          python briefing.py --send
