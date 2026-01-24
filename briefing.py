@@ -316,15 +316,14 @@ def format_briefing() -> str:
 def send_ntfy(message: str, title: str = "Morning Briefing"):
     """Send notification via ntfy.sh."""
     try:
-        # Use JSON body to properly handle unicode in title
+        # Post to base URL with JSON body for proper unicode handling
         resp = requests.post(
-            NTFY_URL,
+            "https://ntfy.sh",
             json={
                 "topic": NTFY_TOPIC,
                 "title": title,
                 "message": message,
-                "tags": ["coffee", "chart_with_upwards_trend"],
-                "markdown": True
+                "tags": ["coffee", "chart_with_upwards_trend"]
             },
             timeout=10
         )
