@@ -251,77 +251,64 @@ def format_briefing() -> str:
     # Header
     et = ZoneInfo("America/New_York")
     now = datetime.now(et)
-    lines.append(f"**{now.strftime('%A, %B %d')}**")
+    lines.append(now.strftime("%A, %B %d").upper())
     lines.append("")
 
     # Market Overview
     market = get_market_overview()
 
-    lines.append("📊 **Markets**")
-
-    # Futures
+    lines.append("MARKETS")
     if market["futures"]:
-        futures_str = ", ".join([
-            f"{name} {pct:+.1f}%"
-            for name, pct in market["futures"].items()
-        ])
-        lines.append(f"Indices: {futures_str}")
+        for name, pct in market["futures"].items():
+            arrow = "▲" if pct >= 0 else "▼"
+            lines.append(f"  {name}: {arrow} {abs(pct):.1f}%")
 
-    # Key events
     if market["events"]:
-        lines.append(f"Key: {', '.join(market['events'][:3])}")
-
-    # Top headlines
-    if market["headlines"]:
-        for headline in market["headlines"][:2]:
-            if len(headline) > 60:
-                headline = headline[:57] + "..."
-            lines.append(f"• {headline}")
+        lines.append(f"  Today: {', '.join(market['events'][:2])}")
 
     lines.append("")
 
     # AI News
-    lines.append("🤖 **AI News**")
+    lines.append("AI NEWS")
     ai_news = get_ai_news()
     if ai_news:
         for headline in ai_news[:2]:
-            if len(headline) > 60:
-                headline = headline[:57] + "..."
-            lines.append(f"• {headline}")
+            if len(headline) > 55:
+                headline = headline[:52] + "..."
+            lines.append(f"  • {headline}")
     else:
-        lines.append("• No major AI news today")
+        lines.append("  No major updates")
 
     lines.append("")
 
     # Portfolio Watch
-    lines.append("📰 **Portfolio Watch**")
+    lines.append("YOUR STOCKS")
     news = get_portfolio_news()
 
     if news:
-        # Group by symbol
         seen_symbols = set()
         for item in news:
             if item["symbol"] not in seen_symbols:
-                flag = "⚠️ " if item["important"] else ""
+                flag = "!" if item["important"] else " "
                 title = item["title"]
-                if len(title) > 50:
-                    title = title[:47] + "..."
-                lines.append(f"{flag}{item['symbol']}: {title}")
+                if len(title) > 45:
+                    title = title[:42] + "..."
+                lines.append(f" {flag}{item['symbol']}: {title}")
                 seen_symbols.add(item["symbol"])
-
-                if len(seen_symbols) >= 5:
+                if len(seen_symbols) >= 4:
                     break
     else:
-        lines.append("No significant news for holdings")
+        lines.append("  No significant news")
 
     lines.append("")
 
     # Business Ideas
-    lines.append("💡 **Ideas**")
+    lines.append("IDEAS")
     ideas = generate_business_ideas()
-
     for i, idea in enumerate(ideas, 1):
-        lines.append(f"{i}. {idea}")
+        if len(idea) > 60:
+            idea = idea[:57] + "..."
+        lines.append(f"  {i}. {idea}")
 
     return "\n".join(lines)
 

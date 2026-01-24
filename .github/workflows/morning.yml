@@ -26,10 +26,5 @@ jobs:
         env:
           NEWS_API_KEY: ${{ secrets.NEWS_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-          WEBULL_EMAIL: ${{ secrets.WEBULL_EMAIL }}
-          WEBULL_PASSWORD: ${{ secrets.WEBULL_PASSWORD }}
-          WEBULL_DEVICE_ID: ${{ secrets.WEBULL_DEVICE_ID }}
-          WEBULL_TRADE_TOKEN: ${{ secrets.WEBULL_TRADE_TOKEN }}
-          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
         run: |
           python briefing.py --send
