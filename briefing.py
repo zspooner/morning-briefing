@@ -95,9 +95,10 @@ def get_portfolio_news() -> list:
 
                 for article in articles[:2]:
                     title = article.get("title", "")
+                    url = article.get("url", "")
                     is_important = any(kw.lower() in title.lower() for kw in important_keywords)
                     if title:
-                        news_items.append({"symbol": symbol, "title": title.split(" - ")[0], "important": is_important})
+                        news_items.append({"symbol": symbol, "title": title.split(" - ")[0], "url": url, "important": is_important})
         except Exception:
             pass
 
@@ -119,7 +120,7 @@ def get_ai_news() -> list:
         )
         if resp.status_code == 200:
             articles = resp.json().get("articles", [])
-            return [a.get("title", "").split(" - ")[0] for a in articles[:2] if a.get("title")]
+            return [{"title": a.get("title", "").split(" - ")[0], "url": a.get("url", "")} for a in articles[:2] if a.get("title")]
     except Exception:
         pass
     return []
@@ -190,10 +191,15 @@ def format_html_briefing() -> str:
 
     # AI news section
     ai_html = ""
-    for headline in ai_news[:2]:
-        if len(headline) > 70:
-            headline = headline[:67] + "..."
-        ai_html += f'<li style="margin-bottom:6px;color:#374151">{headline}</li>'
+    for item in ai_news[:2]:
+        title = item["title"] if isinstance(item, dict) else item
+        url = item.get("url", "") if isinstance(item, dict) else ""
+        if len(title) > 70:
+            title = title[:67] + "..."
+        if url:
+            ai_html += f'<li style="margin-bottom:8px"><a href="{url}" style="color:#2563eb;text-decoration:none">{title}</a></li>'
+        else:
+            ai_html += f'<li style="margin-bottom:8px;color:#374151">{title}</li>'
     if not ai_html:
         ai_html = '<li style="color:#9ca3af">No major AI news today</li>'
 
@@ -203,10 +209,14 @@ def format_html_briefing() -> str:
     for item in portfolio_news:
         if item["symbol"] not in seen:
             title = item["title"]
+            url = item.get("url", "")
             if len(title) > 50:
                 title = title[:47] + "..."
             flag = "🔔 " if item["important"] else ""
-            portfolio_html += f'<li style="margin-bottom:6px"><strong>{item["symbol"]}</strong>: {flag}{title}</li>'
+            if url:
+                portfolio_html += f'<li style="margin-bottom:8px"><strong>{item["symbol"]}</strong>: {flag}<a href="{url}" style="color:#2563eb;text-decoration:none">{title}</a></li>'
+            else:
+                portfolio_html += f'<li style="margin-bottom:8px"><strong>{item["symbol"]}</strong>: {flag}{title}</li>'
             seen.add(item["symbol"])
             if len(seen) >= 4:
                 break
