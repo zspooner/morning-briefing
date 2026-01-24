@@ -6,7 +6,7 @@ Daily automated briefing delivered at 9 AM ET via [ntfy](https://ntfy.sh).
 
 - **Market Overview**: S&P 500, Nasdaq, Dow indices + key economic events
 - **Portfolio Watch**: News for your Webull holdings (earnings, upgrades/downgrades, SEC filings)
-- **5 Business Ideas**: Fresh, actionable ideas generated daily by Claude AI
+- **5 Business Ideas**: Fresh, actionable ideas generated daily by Llama (via Groq)
 
 ## Setup
 
@@ -23,7 +23,7 @@ pip install -r requirements.txt
 | Service | URL | Purpose |
 |---------|-----|---------|
 | News API | https://newsapi.org/ | Market headlines & portfolio news |
-| Anthropic | https://console.anthropic.com/ | Business idea generation |
+| Groq | https://console.groq.com/ | Business idea generation (free tier) |
 | Webull | Your existing account | Portfolio holdings |
 
 ### 3. Configure environment
@@ -39,7 +39,7 @@ cp .env.example .env
 Add these secrets to your repo (Settings → Secrets → Actions):
 
 - `NEWS_API_KEY`
-- `ANTHROPIC_API_KEY`
+- `GROQ_API_KEY`
 - `WEBULL_EMAIL`
 - `WEBULL_PASSWORD`
 - `WEBULL_DEVICE_ID`
@@ -94,6 +94,6 @@ MSFT: Cloud revenue beats expectations
 - Python 3.11+
 - yfinance (market data)
 - newsapi (news headlines)
-- anthropic (Claude API for ideas)
+- groq (Llama 3.3 70B for ideas - free tier)
 - webull (portfolio data)
 - requests (HTTP client)

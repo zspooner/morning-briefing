@@ -14,12 +14,8 @@ try:
 except ImportError:
     pass
 
-ANTHROPIC_ENABLED = False
-try:
-    import anthropic
-    ANTHROPIC_ENABLED = True
-except ImportError:
-    pass
+# Groq API for open source LLM (Llama)
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 # ntfy configuration
 NTFY_TOPIC = os.getenv("NTFY_TOPIC", "zack-briefing")
@@ -27,7 +23,6 @@ NTFY_URL = f"https://ntfy.sh/{NTFY_TOPIC}"
 
 # API Keys
 NEWS_API_KEY = os.getenv("NEWS_API_KEY")
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 WEBULL_EMAIL = os.getenv("WEBULL_EMAIL")
 WEBULL_PASSWORD = os.getenv("WEBULL_PASSWORD")
 WEBULL_DEVICE_ID = os.getenv("WEBULL_DEVICE_ID")
@@ -191,19 +186,19 @@ def get_portfolio_news(holdings: list) -> list:
 
 
 def generate_business_ideas() -> list:
-    """Generate 5 business ideas using Claude API."""
-    if not ANTHROPIC_ENABLED or not ANTHROPIC_API_KEY:
-        return [
-            "Build an AI-powered code review tool for small teams",
-            "Create a subscription box for productivity tools",
-            "Develop a mobile app for tracking personal finances",
-            "Start a newsletter aggregating startup funding news",
-            "Build a marketplace for freelance AI prompt engineers"
-        ]
+    """Generate 5 business ideas using Groq API with Llama."""
+    fallback_ideas = [
+        "Build an AI-powered code review tool for small teams",
+        "Create a subscription box for productivity tools",
+        "Develop a mobile app for tracking personal finances",
+        "Start a newsletter aggregating startup funding news",
+        "Build a marketplace for freelance AI prompt engineers"
+    ]
+
+    if not GROQ_API_KEY:
+        return fallback_ideas
 
     try:
-        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-
         today = datetime.now().strftime("%B %d, %Y")
 
         prompt = f"""Generate exactly 5 business ideas for today ({today}).
@@ -223,34 +218,41 @@ Example format:
 4. Launch a newsletter curating AI research papers for developers
 5. Build a marketplace for selling Notion templates"""
 
-        message = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=300,
-            messages=[{"role": "user", "content": prompt}]
+        resp = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {GROQ_API_KEY}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "model": "llama-3.3-70b-versatile",
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 300,
+                "temperature": 0.8
+            },
+            timeout=30
         )
 
-        response_text = message.content[0].text
-        ideas = []
+        if resp.status_code == 200:
+            response_text = resp.json()["choices"][0]["message"]["content"]
+            ideas = []
 
-        for line in response_text.strip().split("\n"):
-            line = line.strip()
-            if line and line[0].isdigit():
-                # Remove number prefix
-                idea = line.lstrip("0123456789.").strip()
-                if idea:
-                    ideas.append(idea)
+            for line in response_text.strip().split("\n"):
+                line = line.strip()
+                if line and line[0].isdigit():
+                    # Remove number prefix
+                    idea = line.lstrip("0123456789.").strip()
+                    if idea:
+                        ideas.append(idea)
 
-        return ideas[:5] if ideas else generate_business_ideas.__doc__
+            return ideas[:5] if ideas else fallback_ideas
+        else:
+            print(f"Groq API error: {resp.status_code}")
+            return fallback_ideas
 
     except Exception as e:
-        print(f"Claude API error: {e}")
-        return [
-            "Build an AI-powered code review tool for small teams",
-            "Create a subscription box for productivity tools",
-            "Develop a mobile app for tracking personal finances",
-            "Start a newsletter aggregating startup funding news",
-            "Build a marketplace for freelance AI prompt engineers"
-        ]
+        print(f"Groq API error: {e}")
+        return fallback_ideas
 
 
 def format_briefing() -> str:
