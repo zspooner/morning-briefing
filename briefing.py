@@ -370,6 +370,10 @@ def send_email(html: str, subject: str):
             timeout=15
         )
 
+        print(f"DEBUG: Resend response status: {resp.status_code}")
+        print(f"DEBUG: Resend response body: {resp.text}")
+        print(f"DEBUG: Sending to: {EMAIL_TO}")
+
         if resp.status_code == 200:
             print(f"✅ Email sent to {EMAIL_TO}")
             return True
