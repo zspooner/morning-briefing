@@ -54,17 +54,28 @@ def get_market_overview() -> dict:
     """Fetch market data and key economic events."""
     import yfinance as yf
 
-    result = {"futures": {}, "events": [], "headlines": []}
+    result = {"indices": {}, "holdings": {}, "events": [], "headlines": []}
 
-    indices = {"S&P 500": "^GSPC", "Nasdaq": "^IXIC", "Dow": "^DJI"}
-
+    # Major indices
+    indices = {"S&P": "^GSPC", "Nasdaq": "^IXIC", "Dow": "^DJI"}
     for name, ticker in indices.items():
         try:
             idx = yf.Ticker(ticker)
             info = idx.fast_info
             if info.last_price and info.previous_close:
                 change_pct = ((info.last_price - info.previous_close) / info.previous_close) * 100
-                result["futures"][name] = change_pct
+                result["indices"][name] = change_pct
+        except Exception:
+            pass
+
+    # User's holdings
+    for ticker in MY_HOLDINGS:
+        try:
+            stock = yf.Ticker(ticker)
+            info = stock.fast_info
+            if info.last_price and info.previous_close:
+                change_pct = ((info.last_price - info.previous_close) / info.previous_close) * 100
+                result["holdings"][ticker] = change_pct
         except Exception:
             pass
 
@@ -227,12 +238,20 @@ def format_html_briefing() -> str:
     if weather.get("high") and weather.get("low"):
         weather_str = f'<span style="color:#6b7280;font-size:14px;margin-left:12px">NYC: {weather["high"]}°/{weather["low"]}°F</span>'
 
-    # Build market section
-    market_rows = ""
-    for name, pct in market.get("futures", {}).items():
+    # Build indices row (horizontal)
+    indices_html = ""
+    for name, pct in market.get("indices", {}).items():
         color = "#22c55e" if pct >= 0 else "#ef4444"
         arrow = "▲" if pct >= 0 else "▼"
-        market_rows += f'<tr><td style="padding:4px 12px 4px 0;color:#666">{name}</td><td style="color:{color};font-weight:600">{arrow} {abs(pct):.1f}%</td></tr>'
+        indices_html += f'<span style="margin-right:16px"><span style="color:#666">{name}</span> <span style="color:{color};font-weight:600">{arrow}{abs(pct):.1f}%</span></span>'
+
+    # Build holdings grid (your stocks)
+    holdings_html = ""
+    holdings = market.get("holdings", {})
+    for ticker, pct in holdings.items():
+        color = "#22c55e" if pct >= 0 else "#ef4444"
+        arrow = "▲" if pct >= 0 else "▼"
+        holdings_html += f'<div style="display:inline-block;width:70px;margin:4px 8px 4px 0"><span style="color:#374151;font-weight:500">{ticker}</span><br><span style="color:{color};font-size:13px">{arrow}{abs(pct):.1f}%</span></div>'
 
     events_html = ""
     if market.get("events"):
@@ -272,12 +291,10 @@ def format_html_briefing() -> str:
     if not portfolio_html:
         portfolio_html = '<li style="color:#9ca3af">No significant news for your holdings</li>'
 
-    # Ideas section
+    # Ideas section (no truncation)
     ideas_html = ""
     for i, idea in enumerate(ideas, 1):
-        if len(idea) > 70:
-            idea = idea[:67] + "..."
-        ideas_html += f'<li style="margin-bottom:6px">{idea}</li>'
+        ideas_html += f'<li style="margin-bottom:8px">{idea}</li>'
 
     html = f"""
 <!DOCTYPE html>
@@ -289,7 +306,8 @@ def format_html_briefing() -> str:
 
     <div style="margin-bottom:20px">
       <h2 style="margin:0 0 10px 0;font-size:14px;color:#6b7280;text-transform:uppercase;letter-spacing:0.5px">Markets</h2>
-      <table style="font-size:15px">{market_rows}</table>
+      <div style="font-size:14px;margin-bottom:10px">{indices_html}</div>
+      <div style="margin-top:8px">{holdings_html}</div>
       {events_html}
     </div>
 
