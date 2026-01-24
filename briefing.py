@@ -375,7 +375,17 @@ def send_email(html: str, subject: str):
         print(f"DEBUG: Sending to: {EMAIL_TO}")
 
         if resp.status_code == 200:
+            email_id = resp.json().get("id")
             print(f"✅ Email sent to {EMAIL_TO}")
+            # Check delivery status
+            import time
+            time.sleep(3)
+            status_resp = requests.get(
+                f"https://api.resend.com/emails/{email_id}",
+                headers={"Authorization": f"Bearer {RESEND_API_KEY}"},
+                timeout=10
+            )
+            print(f"DEBUG: Email status check: {status_resp.status_code} - {status_resp.text}")
             return True
         else:
             print(f"❌ Resend error: {resp.status_code} - {resp.text}")
