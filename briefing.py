@@ -186,6 +186,53 @@ def get_dev_tools_news() -> list:
     return []
 
 
+def get_daily_mindset() -> str:
+    """Generate a daily mindset reminder about positive manifestation, self-kindness, and narrative power."""
+    fallback_reminders = [
+        "Your thoughts shape your reality. Instead of 'I don't want to fail,' try 'I am building something meaningful.' What you focus on expands.",
+        "Be gentle with yourself today. The story you tell about who you are becomes the life you live. Write it with compassion.",
+        "Don't run from what you fear—run toward what you want. 'I want to be confident' creates a different future than 'I don't want to be anxious.'",
+        "You are the narrator of your own story. Speak to yourself like someone you love. The narrative you choose becomes your truth.",
+        "Manifestation isn't magic—it's focus. Frame your desires positively: 'I am becoming' rather than 'I hope I'm not.' Your mind follows your words.",
+        "Today's reminder: Be kind to yourself. Your inner dialogue shapes your outer world. Replace 'I shouldn't be this way' with 'I'm growing into who I want to be.'",
+        "The power of narrative: You can't avoid your way to success. Focus on what you're building, not what you're escaping. Your story is what you choose to emphasize.",
+        "Thoughts become beliefs, beliefs become actions. 'I am capable' opens doors that 'I hope I don't mess up' keeps closed. Choose your words wisely.",
+    ]
+
+    if not GROQ_API_KEY:
+        import random
+        return random.choice(fallback_reminders)
+
+    try:
+        prompt = """Generate ONE brief mindset reminder (2-3 sentences max) for someone starting their day.
+
+The reminder should touch on ONE of these themes:
+- Positive manifestation: frame desires as what you WANT, not what you want to avoid ("I want to be confident" vs "I don't want to be anxious")
+- Self-compassion: speak to yourself kindly, as you would a friend
+- The power of narrative: the story you tell yourself becomes your reality
+
+Make it warm, practical, and grounded—not cheesy or overly spiritual. No hashtags or emojis.
+Return ONLY the reminder text, nothing else."""
+
+        resp = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+            json={"model": "llama-3.3-70b-versatile", "messages": [{"role": "user", "content": prompt}], "max_tokens": 150, "temperature": 0.9},
+            timeout=15
+        )
+
+        if resp.status_code == 200:
+            reminder = resp.json()["choices"][0]["message"]["content"].strip()
+            if reminder and len(reminder) > 20:
+                return reminder
+
+    except Exception as e:
+        print(f"Mindset generation error: {e}")
+
+    import random
+    return random.choice(fallback_reminders)
+
+
 def generate_business_ideas() -> list:
     """Generate 5 business ideas using Groq API with Llama."""
     fallback_ideas = [
@@ -246,6 +293,7 @@ def format_html_briefing() -> str:
     date_str = now.strftime("%A, %B %d")
 
     weather = get_nyc_weather()
+    mindset = get_daily_mindset()
     market = get_market_overview()
     dev_news = get_dev_tools_news()
     portfolio_news = get_portfolio_news()
@@ -321,6 +369,10 @@ def format_html_briefing() -> str:
 <body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:500px;margin:0 auto;padding:20px;background:#f9fafb">
   <div style="background:white;border-radius:12px;padding:24px;box-shadow:0 1px 3px rgba(0,0,0,0.1)">
     <h1 style="margin:0 0 20px 0;font-size:20px;color:#111">☀️ {date_str}{weather_str}</h1>
+
+    <div style="margin-bottom:20px;padding:16px;background:linear-gradient(135deg,#fef3c7 0%,#fde68a 100%);border-radius:8px;border-left:4px solid #f59e0b">
+      <p style="margin:0;font-size:14px;color:#78350f;line-height:1.6;font-style:italic">{mindset}</p>
+    </div>
 
     <div style="margin-bottom:20px">
       <h2 style="margin:0 0 10px 0;font-size:14px;color:#6b7280;text-transform:uppercase;letter-spacing:0.5px">Markets</h2>
@@ -406,13 +458,16 @@ def main():
 
     if args.test or not args.send:
         # Show text preview
+        mindset = get_daily_mindset()
         market = get_market_overview()
         dev_news = get_dev_tools_news()
         portfolio_news = get_portfolio_news()
         ideas = generate_business_ideas()
 
         print("=" * 50)
-        print("MARKETS")
+        print("MINDSET")
+        print(f"  {mindset}")
+        print("\nMARKETS")
         for name, pct in market.get("futures", {}).items():
             arrow = "▲" if pct >= 0 else "▼"
             print(f"  {name}: {arrow} {abs(pct):.1f}%")
