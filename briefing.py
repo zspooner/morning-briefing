@@ -221,13 +221,20 @@ Return ONLY the reminder text, nothing else."""
             timeout=15
         )
 
+        print(f"DEBUG: Groq mindset response status: {resp.status_code}")
+        if resp.status_code != 200:
+            print(f"DEBUG: Groq mindset error: {resp.text}")
+
         if resp.status_code == 200:
             reminder = resp.json()["choices"][0]["message"]["content"].strip()
+            print(f"DEBUG: Generated mindset: {reminder[:50]}...")
             if reminder and len(reminder) > 20:
                 return reminder
 
     except Exception as e:
         print(f"Mindset generation error: {e}")
+        import traceback
+        traceback.print_exc()
 
     import random
     return random.choice(fallback_reminders)
@@ -268,6 +275,10 @@ Return ONLY 5 numbered lines. No intro."""
             json={"model": "llama-3.3-70b-versatile", "messages": [{"role": "user", "content": prompt}], "max_tokens": 300, "temperature": 0.8},
             timeout=30
         )
+
+        print(f"DEBUG: Groq ideas response status: {resp.status_code}")
+        if resp.status_code != 200:
+            print(f"DEBUG: Groq ideas error: {resp.text}")
 
         if resp.status_code == 200:
             response_text = resp.json()["choices"][0]["message"]["content"]
