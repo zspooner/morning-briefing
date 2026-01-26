@@ -1,0 +1,32 @@
+name: Morning Briefing
+
+on:
+  schedule:
+    # 8am EST = 13:00 UTC (standard time) / 12:00 UTC (daylight time)
+    # Using 13:00 UTC for EST
+    - cron: '0 13 * * *'
+  workflow_dispatch: # Allow manual trigger
+
+jobs:
+  send-briefing:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          pip install requests yfinance python-dotenv
+
+      - name: Send briefing
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          NEWS_API_KEY: ${{ secrets.NEWS_API_KEY }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+        run: python briefing.py --send

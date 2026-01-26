@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
 """Morning Briefing Bot - Daily briefing with markets, portfolio news, and business ideas."""
 import os
+from pathlib import Path
 import argparse
 import requests
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
+from dotenv import load_dotenv
+
+# Load .env from script directory
+load_dotenv(Path(__file__).parent / ".env")
 
 # API Keys
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
