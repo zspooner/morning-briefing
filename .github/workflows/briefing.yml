@@ -1,15 +1,27 @@
-name: Morning Briefing
+name: Daily Briefings
 
 on:
   schedule:
-    # 8am EST = 13:00 UTC (standard time) / 12:00 UTC (daylight time)
-    # Using 13:00 UTC for EST
+    # Morning: 8am EST = 13:00 UTC (standard time)
     - cron: '0 13 * * *'
-  workflow_dispatch: # Allow manual trigger
+    # Afternoon: 4:15pm EST = 21:15 UTC (standard time)
+    - cron: '15 21 * * 1-5'  # Weekdays only (Mon-Fri)
+  workflow_dispatch:
+    inputs:
+      briefing_type:
+        description: 'Which briefing to send'
+        required: true
+        default: 'morning'
+        type: choice
+        options:
+          - morning
+          - afternoon
+          - both
 
 jobs:
-  send-briefing:
+  morning-briefing:
     runs-on: ubuntu-latest
+    if: github.event.schedule == '0 13 * * *' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.briefing_type == 'morning' || github.event.inputs.briefing_type == 'both'))
 
     steps:
       - uses: actions/checkout@v4
@@ -23,10 +35,33 @@ jobs:
         run: |
           pip install requests yfinance python-dotenv
 
-      - name: Send briefing
+      - name: Send morning briefing
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           NEWS_API_KEY: ${{ secrets.NEWS_API_KEY }}
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
         run: python briefing.py --send
+
+  afternoon-briefing:
+    runs-on: ubuntu-latest
+    if: github.event.schedule == '15 21 * * 1-5' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.briefing_type == 'afternoon' || github.event.inputs.briefing_type == 'both'))
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          pip install requests yfinance python-dotenv
+
+      - name: Send afternoon market summary
+        env:
+          NEWS_API_KEY: ${{ secrets.NEWS_API_KEY }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+        run: python afternoon_briefing.py --send
