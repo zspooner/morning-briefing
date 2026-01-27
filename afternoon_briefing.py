@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).parent / ".env")
 
 # API Keys
-NEWS_API_KEY = os.getenv("NEWS_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 RESEND_API_KEY = os.getenv("RESEND_API_KEY")
 EMAIL_TO = os.getenv("EMAIL_TO")
 
@@ -72,43 +72,6 @@ def get_market_close_data() -> dict:
     return result
 
 
-def get_market_headlines() -> list:
-    """Get top business/market headlines from today."""
-    if not NEWS_API_KEY:
-        return []
-
-    headlines = []
-    try:
-        resp = requests.get(
-            "https://newsapi.org/v2/top-headlines",
-            params={
-                "apiKey": NEWS_API_KEY,
-                "category": "business",
-                "country": "us",
-                "pageSize": 10
-            },
-            timeout=10
-        )
-        if resp.status_code == 200:
-            articles = resp.json().get("articles", [])
-            for article in articles[:6]:
-                title = article.get("title", "")
-                url = article.get("url", "")
-                source = article.get("source", {}).get("name", "")
-                if title and " - " in title:
-                    title = title.rsplit(" - ", 1)[0]
-                if title:
-                    headlines.append({
-                        "title": title,
-                        "url": url,
-                        "source": source
-                    })
-    except Exception:
-        pass
-
-    return headlines
-
-
 def get_sector_performance() -> dict:
     """Get sector ETF performance for the day."""
     import yfinance as yf
@@ -136,6 +99,66 @@ def get_sector_performance() -> dict:
     return performance
 
 
+def generate_market_summary(indices: dict, sectors: dict) -> str:
+    """Use Groq LLM to generate a 1-2 sentence summary of why the market moved today."""
+    fallback_summaries = [
+        "Markets showed mixed performance today with sector rotation driving most of the movement.",
+        "Trading was relatively muted today as investors digested recent economic data.",
+        "The market saw broad-based movement today driven by macroeconomic factors.",
+    ]
+
+    if not GROQ_API_KEY:
+        import random
+        return random.choice(fallback_summaries)
+
+    # Build context for the LLM
+    indices_str = ", ".join([f"{name} {data['change_pct']:+.2f}%" for name, data in indices.items()])
+    sectors_sorted = sorted(sectors.items(), key=lambda x: x[1], reverse=True)
+    top_sector = sectors_sorted[0] if sectors_sorted else ("Tech", 0)
+    bottom_sector = sectors_sorted[-1] if sectors_sorted else ("Healthcare", 0)
+
+    today = datetime.now().strftime("%B %d, %Y")
+
+    prompt = f"""You are a concise financial analyst. Based on today's market data ({today}), write 1-2 sentences explaining WHY the market moved the way it did.
+
+Today's data:
+- Indices: {indices_str}
+- Best sector: {top_sector[0]} ({top_sector[1]:+.1f}%)
+- Worst sector: {bottom_sector[0]} ({bottom_sector[1]:+.1f}%)
+
+Guidelines:
+- Be specific about likely drivers (earnings season, Fed expectations, sector rotation, economic data, etc.)
+- Don't just restate the numbers - explain the narrative
+- Keep it conversational but informed
+- 1-2 sentences max, no fluff
+
+Return ONLY the summary, nothing else."""
+
+    try:
+        resp = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+            json={
+                "model": "llama-3.3-70b-versatile",
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 100,
+                "temperature": 0.7
+            },
+            timeout=15
+        )
+
+        if resp.status_code == 200:
+            summary = resp.json()["choices"][0]["message"]["content"].strip()
+            if summary and len(summary) > 20:
+                return summary
+
+    except Exception as e:
+        print(f"Groq error: {e}")
+
+    import random
+    return random.choice(fallback_summaries)
+
+
 def format_html_summary() -> str:
     """Build HTML email for afternoon market summary."""
     et = ZoneInfo("America/New_York")
@@ -143,8 +166,8 @@ def format_html_summary() -> str:
     date_str = now.strftime("%A, %B %d")
 
     market = get_market_close_data()
-    headlines = get_market_headlines()
     sectors = get_sector_performance()
+    summary = generate_market_summary(market.get("indices", {}), sectors)
 
     # Calculate portfolio daily change
     holdings = market.get("holdings", {})
@@ -208,23 +231,6 @@ def format_html_summary() -> str:
         arrow = "+" if pct >= 0 else ""
         sectors_html += f'<span style="margin-right:12px;color:{color}">{name} {arrow}{pct:.1f}%</span>'
 
-    # Headlines
-    headlines_html = ""
-    for item in headlines[:5]:
-        title = item["title"]
-        url = item.get("url", "")
-        source = item.get("source", "")
-        if len(title) > 80:
-            title = title[:77] + "..."
-        source_tag = f' <span style="color:#9ca3af">({source})</span>' if source else ""
-        if url:
-            headlines_html += f'<li style="margin-bottom:10px"><a href="{url}" style="color:#2563eb;text-decoration:none">{title}</a>{source_tag}</li>'
-        else:
-            headlines_html += f'<li style="margin-bottom:10px;color:#374151">{title}{source_tag}</li>'
-
-    if not headlines_html:
-        headlines_html = '<li style="color:#9ca3af">No major headlines today</li>'
-
     html = f"""
 <!DOCTYPE html>
 <html>
@@ -233,6 +239,10 @@ def format_html_summary() -> str:
   <div style="background:white;border-radius:12px;padding:24px;box-shadow:0 1px 3px rgba(0,0,0,0.1)">
     <h1 style="margin:0 0 4px 0;font-size:20px;color:#111">Market Close - {date_str}</h1>
     <p style="margin:0 0 20px 0;color:#6b7280;font-size:14px">4:00 PM ET Summary</p>
+
+    <div style="margin-bottom:20px;padding:16px;background:linear-gradient(135deg,#eff6ff 0%,#dbeafe 100%);border-radius:8px;border-left:4px solid #3b82f6">
+      <p style="margin:0;font-size:14px;color:#1e40af;line-height:1.6">{summary}</p>
+    </div>
 
     <div style="margin-bottom:20px">
       <h2 style="margin:0 0 12px 0;font-size:14px;color:#6b7280;text-transform:uppercase;letter-spacing:0.5px">Major Indices</h2>
@@ -251,14 +261,9 @@ def format_html_summary() -> str:
       <div style="margin-top:12px;font-size:13px">{movers_html}</div>
     </div>
 
-    <div style="margin-bottom:20px">
+    <div>
       <h2 style="margin:0 0 10px 0;font-size:14px;color:#6b7280;text-transform:uppercase;letter-spacing:0.5px">Sectors</h2>
       <div style="font-size:13px">{sectors_html}</div>
-    </div>
-
-    <div>
-      <h2 style="margin:0 0 10px 0;font-size:14px;color:#6b7280;text-transform:uppercase;letter-spacing:0.5px">Today's Headlines</h2>
-      <ul style="margin:0;padding-left:20px;font-size:14px;line-height:1.5">{headlines_html}</ul>
     </div>
   </div>
   <p style="text-align:center;color:#9ca3af;font-size:12px;margin-top:16px">Market Close Summary</p>
@@ -309,11 +314,14 @@ def main():
 
     if args.test or not args.send:
         market = get_market_close_data()
-        headlines = get_market_headlines()
         sectors = get_sector_performance()
+        summary = generate_market_summary(market.get("indices", {}), sectors)
 
         print("=" * 50)
-        print("INDICES")
+        print("WHY THE MARKET MOVED")
+        print(f"  {summary}")
+
+        print("\nINDICES")
         for name, data in market.get("indices", {}).items():
             arrow = "+" if data["change_pct"] >= 0 else ""
             print(f"  {name}: {data['price']:,.0f} ({arrow}{data['change_pct']:.2f}%)")
@@ -327,10 +335,6 @@ def main():
         for name, pct in sectors.items():
             arrow = "+" if pct >= 0 else ""
             print(f"  {name}: {arrow}{pct:.1f}%")
-
-        print("\nHEADLINES")
-        for h in headlines[:5]:
-            print(f"  - {h['title'][:60]}...")
         print("=" * 50)
 
     if args.send:
