@@ -534,6 +534,143 @@ def get_heads_up() -> dict | None:
     return None
 
 
+def get_trending_stocks() -> list:
+    """Scan social media for stocks gaining momentum — surfaces early-mover picks.
+
+    Sources: ApeWisdom (Reddit aggregator), Yahoo Finance Trending, yfinance market data.
+    Returns top picks sorted by composite score.
+    """
+    MEGA_CAPS = {
+        "AAPL", "MSFT", "AMZN", "GOOGL", "GOOG", "META", "TSLA", "NVDA",
+        "BRK.A", "BRK.B", "JPM", "V", "MA", "UNH", "JNJ", "WMT", "PG",
+        "XOM", "HD", "CVX", "LLY", "ABBV", "MRK", "KO", "PEP", "BAC",
+        "SPY", "QQQ", "IWM", "DIA", "VOO", "VTI", "TQQQ", "SQQQ",
+        "SPXL", "SPXS", "VXX", "UVXY",
+    }
+    FALSE_TICKERS = {
+        "A", "I", "AM", "AN", "AT", "BE", "BY", "DO", "GO", "IF",
+        "IN", "IS", "IT", "MY", "NO", "OF", "ON", "OR", "SO", "TO",
+        "UP", "US", "WE", "DD", "CEO", "IPO", "ETF", "GDP", "SEC",
+        "FBI", "CIA", "FDA", "FED", "ATH", "OTM", "ITM", "DTE", "IV",
+        "PE", "EPS", "RSI", "IMO", "FYI", "TBH", "EOD", "AH", "PM",
+        "TA", "FA", "PT", "SP", "ALL", "FOR", "ARE", "NOW", "NEW",
+        "HAS", "CAN", "ONE", "TWO", "OLD", "BIG", "LOW", "RUN",
+        "TOP", "AI", "EV", "UK", "EU", "US", "RE", "TD",
+    }
+
+    try:
+        import yfinance as yf
+
+        # 1. ApeWisdom — Reddit mention aggregator
+        reddit_tickers = {}
+        for page in range(1, 4):
+            try:
+                r = requests.get(f"https://apewisdom.io/api/v1.0/filter/all-stocks/page/{page}", timeout=10)
+                if r.status_code == 200:
+                    for t in r.json().get("results", []):
+                        ticker = t.get("ticker", "").upper()
+                        if ticker and ticker not in MEGA_CAPS and ticker not in FALSE_TICKERS and len(ticker) <= 5:
+                            reddit_tickers[ticker] = t
+            except Exception:
+                pass
+
+        # 2. Yahoo Finance Trending
+        yahoo_trending = set()
+        try:
+            r = requests.get("https://query1.finance.yahoo.com/v1/finance/trending/US",
+                             headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+            if r.status_code == 200:
+                for q in r.json().get("finance", {}).get("result", [{}])[0].get("quotes", []):
+                    sym = q["symbol"]
+                    if "-" not in sym:
+                        yahoo_trending.add(sym)
+        except Exception:
+            pass
+
+        # 3. Build candidate list, get market data for top 30
+        candidates = list(reddit_tickers.items())
+        candidates.sort(key=lambda x: x[1].get("mentions", 0), reverse=True)
+        top_syms = [t for t, _ in candidates[:30]]
+        # Add Yahoo trending not in Reddit
+        for sym in yahoo_trending:
+            if sym not in reddit_tickers and sym not in MEGA_CAPS and sym not in FALSE_TICKERS:
+                top_syms.append(sym)
+                reddit_tickers[sym] = {"ticker": sym, "mentions": 0}
+
+        market_data = {}
+        try:
+            batch = yf.download(top_syms[:40], period="1mo", progress=False, threads=True)
+            for sym in top_syms[:40]:
+                try:
+                    df = batch[sym] if sym in batch.columns.get_level_values(0) else batch
+                    if df is not None and not df.empty and len(df) >= 2:
+                        latest, prev, first = df.iloc[-1], df.iloc[-2], df.iloc[0]
+                        vol_avg = df["Volume"].mean()
+                        info = yf.Ticker(sym).fast_info
+                        market_data[sym] = {
+                            "price": round(float(latest["Close"]), 2),
+                            "change_1d": round(float((latest["Close"] - prev["Close"]) / prev["Close"] * 100), 1),
+                            "change_1mo": round(float((latest["Close"] - first["Close"]) / first["Close"] * 100), 1),
+                            "vol_ratio": round(float(latest["Volume"] / vol_avg), 1) if vol_avg > 0 else 0,
+                            "market_cap": getattr(info, "market_cap", None),
+                        }
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # 4. Score each ticker
+        scored = []
+        for sym in top_syms[:40]:
+            rd = reddit_tickers.get(sym, {})
+            score, signals = 0, []
+
+            mentions = rd.get("mentions", 0) or 0
+            mentions_ago = rd.get("mentions_24h_ago") or mentions or 1
+            accel = (mentions - mentions_ago) / mentions_ago if mentions_ago > 0 else 0
+
+            if accel > 0.5:
+                score += 30; signals.append(f"Reddit surging +{accel:.0%}")
+            elif accel > 0.2:
+                score += 15; signals.append(f"Reddit rising +{accel:.0%}")
+            if mentions >= 20:
+                score += 20; signals.append(f"{mentions} Reddit mentions")
+            elif mentions >= 10:
+                score += 10; signals.append(f"{mentions} mentions")
+            if sym in yahoo_trending:
+                score += 15; signals.append("Yahoo trending")
+
+            mkt = market_data.get(sym, {})
+            if mkt:
+                if mkt.get("vol_ratio", 0) >= 2.0:
+                    score += 25; signals.append(f"Vol {mkt['vol_ratio']}x avg")
+                elif mkt.get("vol_ratio", 0) >= 1.5:
+                    score += 10
+                cap = mkt.get("market_cap")
+                if cap and cap < 2e9:
+                    score += 20; signals.append("Small cap")
+                elif cap and cap < 10e9:
+                    score += 10; signals.append("Mid cap")
+                chg = mkt.get("change_1mo", 0)
+                if 10 < chg < 50:
+                    score += 15; signals.append(f"+{chg}% 1mo")
+                elif chg > 50:
+                    score += 5; signals.append(f"+{chg}% 1mo (extended)")
+
+            if score >= 40 and signals:
+                scored.append({
+                    "ticker": sym, "score": score, "signals": signals,
+                    "price": mkt.get("price"), "change_1d": mkt.get("change_1d", 0),
+                    "market_cap": mkt.get("market_cap"),
+                })
+
+        scored.sort(key=lambda x: x["score"], reverse=True)
+        return scored[:5]
+
+    except Exception:
+        return []
+
+
 def format_html_briefing() -> str:
     """Build lean HTML email briefing."""
     et = ZoneInfo("America/New_York")
@@ -546,6 +683,7 @@ def format_html_briefing() -> str:
     earnings = get_earnings_calendar()
     repos = get_trending_repos()
     heads_up = get_heads_up()
+    trending = get_trending_stocks()
 
     # --- Portfolio holdings (Webull positions with daily P&L, sorted by market value) ---
     holdings_html = ""
@@ -642,6 +780,40 @@ def format_html_briefing() -> str:
             f'{items}</div>'
         )
 
+    # --- Trending stocks (social momentum scanner) ---
+    trending_html = ""
+    if trending:
+        items_html = ""
+        for t in trending:
+            tier = "🔥" if t["score"] >= 60 else "⚡"
+            color = "#22c55e" if t.get("change_1d", 0) >= 0 else "#ef4444"
+            chg_str = f"+{t['change_1d']}%" if t.get("change_1d", 0) >= 0 else f"{t['change_1d']}%"
+            cap = t.get("market_cap")
+            if cap and cap >= 1e9:
+                cap_str = f"${cap/1e9:.1f}B"
+            elif cap and cap >= 1e6:
+                cap_str = f"${cap/1e6:.0f}M"
+            else:
+                cap_str = ""
+            sig_str = " · ".join(t["signals"][:3])
+            items_html += (
+                f'<div style="margin-bottom:8px;padding:10px 12px;background:#fefce8;border-radius:6px;'
+                f'border-left:3px solid #eab308">'
+                f'<div style="display:flex;justify-content:space-between;align-items:center">'
+                f'<span style="font-weight:700;font-size:14px;color:#1e293b">{tier} {t["ticker"]}'
+                f'<span style="font-weight:400;color:#6b7280;font-size:12px;margin-left:6px">{cap_str}</span></span>'
+                f'<span style="font-weight:600;color:{color};font-size:13px">${t.get("price", "?")} ({chg_str})</span>'
+                f'</div>'
+                f'<div style="color:#78350f;font-size:11px;margin-top:4px">{sig_str}</div>'
+                f'</div>'
+            )
+        trending_html = (
+            f'<div style="margin-bottom:18px">'
+            f'<h2 style="margin:0 0 8px 0;font-size:12px;color:#6b7280;text-transform:uppercase;letter-spacing:0.5px">'
+            f'📡 Trending Stocks — Social Momentum</h2>'
+            f'{items_html}</div>'
+        )
+
     # --- Trending repos ---
     repos_html = ""
     for repo in repos:
@@ -677,6 +849,8 @@ def format_html_briefing() -> str:
     {bot_html}
 
     {earnings_html}
+
+    {trending_html}
 
     <div>
       <h2 style="margin:0 0 8px 0;font-size:12px;color:#6b7280;text-transform:uppercase;letter-spacing:0.5px">Trending Repos</h2>
@@ -769,6 +943,16 @@ def main():
             print("EARNINGS SOON")
             for e in earnings:
                 print(f"  {e['ticker']}: {e['date']} ({e['days_away']}d)")
+            print()
+
+        trending = get_trending_stocks()
+        if trending:
+            print("TRENDING STOCKS")
+            for t in trending:
+                tier = "🔥" if t["score"] >= 60 else "⚡"
+                sigs = " · ".join(t["signals"][:3])
+                chg = t.get("change_1d", 0)
+                print(f"  {tier} {t['ticker']} ${t.get('price','?')} ({'+' if chg>=0 else ''}{chg}%) — {sigs}")
             print()
 
         print("REPOS")
