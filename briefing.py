@@ -625,7 +625,7 @@ def get_trending_stocks() -> list:
                     latest = df.iloc[-1]
                     prev = df.iloc[-2]
                     price = float(latest["Close"])
-                    if price < 2:
+                    if price < 2 or price != price:  # filter NaN
                         continue
 
                     # Winner profile features
@@ -641,12 +641,19 @@ def get_trending_stocks() -> list:
                     if price > 100:
                         continue  # winner profile: lower-priced stocks outperform
 
-                    # 3-month return (skip if already extended)
+                    # 3-month and 12-month return (skip if already extended)
                     change_3mo = 0
                     if len(df) >= 63:
                         p63 = float(df["Close"].iloc[-63])
                         change_3mo = (price - p63) / p63 * 100 if p63 > 0 else 0
-                    if change_3mo > 100:
+                    change_12mo = 0
+                    if len(df) >= 252:
+                        p252 = float(df["Close"].iloc[-252])
+                        change_12mo = (price - p252) / p252 * 100 if p252 > 0 else 0
+                    elif len(df) >= 126:
+                        p_first = float(df["Close"].iloc[0])
+                        change_12mo = (price - p_first) / p_first * 100 if p_first > 0 else 0
+                    if change_3mo > 100 or change_12mo > 200:
                         continue  # already had its run
 
                     # 52-week high/low
@@ -654,6 +661,11 @@ def get_trending_stocks() -> list:
                     low_52w = float(df["Close"].min())
                     pct_from_high = (price - high_52w) / high_52w * 100
                     pct_from_low = (price - low_52w) / low_52w * 100 if low_52w > 0 else 0
+
+                    # Hard filter: must be at least 15% below 52w high
+                    # If it's near highs, the big move already happened
+                    if pct_from_high > -15:
+                        continue
 
                     # Volatility (annualized, 20-day)
                     daily_returns = df["Close"].pct_change().dropna().iloc[-20:]
@@ -759,8 +771,12 @@ def get_trending_stocks() -> list:
             if sym in yahoo_trending:
                 signals.append("Yahoo trending")
 
-            # Require profile score >= 3 (matches multiple winner traits)
-            if profile_score < 3:
+            # Require profile score >= 3 AND at least one fundamental signal
+            # (revenue or earnings growth). Without fundamentals, it's just
+            # a volatile small cap — not a real discovery.
+            has_fundamental = (mkt["rev_growth"] is not None and mkt["rev_growth"] > 0.03) or \
+                              (mkt["earn_growth"] is not None and mkt["earn_growth"] > 0)
+            if profile_score < 3 or not has_fundamental:
                 continue
 
             scored.append({
