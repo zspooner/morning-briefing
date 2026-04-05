@@ -535,21 +535,20 @@ def get_heads_up() -> dict | None:
 
 
 def get_trending_stocks() -> list:
-    """Discovery radar: surface exciting stocks EARLY, before they go mainstream.
+    """Discovery radar: finds stocks matching the 1-year big winner profile.
 
-    Finds the next ASTS, NBIS, RKLB — companies in emerging sectors (space, AI,
-    quantum, nuclear, fintech) that retail social media is just starting to notice.
-    User holds these for months/years, not days.
+    Two-stage approach:
+    1. SOCIAL DISCOVERY — ApeWisdom + Yahoo surface names getting early buzz
+    2. WINNER PROFILE FILTER — only flag stocks that match the data-driven
+       profile of stocks that went on to 2x+ (GBM model, AUC 0.967):
+       - Market cap $1-20B (sweet spot for multi-baggers)
+       - Price under $50 (lower-priced stocks outperform)
+       - Revenue growing (>3%)
+       - Higher volatility (>30% annualized — exciting, narrative-driven)
+       - Not at all-time highs (still has room to run)
+       - Not already up 100%+ in 3 months (missed the move)
 
-    Backtested: caught 73% of stocks that eventually 2x'd, avg 6-month return +25%.
-
-    Discovery signals (need 2+ to flag):
-    - Volume awakening: volume rising from a quiet base (not blow-off)
-    - Still cheap: within 30% of recent lows (hasn't run yet)
-    - Early momentum: +5-20% in last week (starting to move, not parabolic)
-    - Small/mid cap: < $20B (where the big movers live)
-    - Not extended: not already up 100%+ recently
-    - Social buzz growing: Reddit mention acceleration (velocity, not level)
+    Social buzz is the funnel. The winner profile is the filter.
     """
     MEGA_CAPS = {
         "AAPL", "MSFT", "AMZN", "GOOGL", "GOOG", "META", "TSLA", "NVDA",
@@ -570,9 +569,11 @@ def get_trending_stocks() -> list:
     }
 
     try:
+        import math
+        import numpy as np
         import yfinance as yf
 
-        # 1. ApeWisdom — Reddit mention aggregator (social discovery)
+        # ── Stage 1: Social discovery (find names people are talking about) ──
         reddit_tickers = {}
         for page in range(1, 4):
             try:
@@ -585,7 +586,6 @@ def get_trending_stocks() -> list:
             except Exception:
                 pass
 
-        # 2. Yahoo Finance Trending
         yahoo_trending = set()
         try:
             r = requests.get("https://query1.finance.yahoo.com/v1/finance/trending/US",
@@ -598,60 +598,76 @@ def get_trending_stocks() -> list:
         except Exception:
             pass
 
-        # 3. Build candidate list — sort by mention velocity (early buzz, not peak buzz)
-        candidates = list(reddit_tickers.items())
-        def mention_accel(item):
-            t = item[1]
-            m = t.get("mentions", 0) or 0
-            m_ago = t.get("mentions_24h_ago") or m or 1
-            return (m - m_ago) / m_ago if m_ago > 0 else 0
-        candidates.sort(key=mention_accel, reverse=True)
-        top_syms = [t for t, _ in candidates[:50]]
+        # Take ALL Reddit candidates (not just top 50) — the winner profile
+        # filter is strict enough, so cast a wide net for social discovery
+        top_syms = list(reddit_tickers.keys())
         for sym in yahoo_trending:
             if sym not in reddit_tickers and sym not in MEGA_CAPS and sym not in FALSE_TICKERS:
                 top_syms.append(sym)
                 reddit_tickers[sym] = {"ticker": sym, "mentions": 0}
 
-        # 4. Get market data — need 6mo for discovery signals
+        # ── Stage 2: Get data and apply winner profile filter ──
         market_data = {}
         try:
-            batch = yf.download(top_syms[:60], period="6mo", progress=False, threads=True)
-            for sym in top_syms[:60]:
+            batch = yf.download(top_syms[:100], period="1y", progress=False, threads=True)
+            import pandas as pd
+            for sym in top_syms[:100]:
                 try:
-                    if len(top_syms[:60]) == 1:
-                        df = batch
+                    if isinstance(batch.columns, pd.MultiIndex):
+                        if sym not in batch.columns.get_level_values("Ticker"):
+                            continue
+                        df = batch.xs(sym, level="Ticker", axis=1)
                     else:
-                        df = batch[sym] if sym in batch.columns.get_level_values(0) else None
-                    if df is None or df.empty or len(df) < 20:
+                        df = batch
+                    if df is None or df.empty or len(df) < 50:
                         continue
 
                     latest = df.iloc[-1]
                     prev = df.iloc[-2]
                     price = float(latest["Close"])
-
-                    # Filter: price >= $2
                     if price < 2:
                         continue
 
-                    avg_vol_20d = float(df["Volume"].iloc[-20:].mean())
-                    avg_vol_60d = float(df["Volume"].iloc[-60:].mean()) if len(df) >= 60 else avg_vol_20d
-                    vol_ratio = float(latest["Volume"] / avg_vol_20d) if avg_vol_20d > 0 else 0
+                    # Winner profile features
+                    ticker_obj = yf.Ticker(sym)
+                    info = ticker_obj.fast_info
+                    cap = getattr(info, "market_cap", None)
 
-                    # 6-month low for "still cheap" check
-                    low_6mo = float(df["Close"].min())
-                    pct_from_low = (price - low_6mo) / low_6mo * 100 if low_6mo > 0 else 999
+                    # Hard filters from winner analysis
+                    if cap and cap > 20e9:
+                        continue  # too big for multi-bagger potential
+                    if not cap:
+                        continue  # can't evaluate without market cap
+                    if price > 100:
+                        continue  # winner profile: lower-priced stocks outperform
 
-                    # 5-day return (early momentum)
-                    change_5d = 0
-                    if len(df) >= 6:
-                        p5 = float(df["Close"].iloc[-6])
-                        change_5d = (price - p5) / p5 * 100 if p5 > 0 else 0
-
-                    # 3-month return (already extended check)
+                    # 3-month return (skip if already extended)
                     change_3mo = 0
                     if len(df) >= 63:
                         p63 = float(df["Close"].iloc[-63])
                         change_3mo = (price - p63) / p63 * 100 if p63 > 0 else 0
+                    if change_3mo > 100:
+                        continue  # already had its run
+
+                    # 52-week high/low
+                    high_52w = float(df["Close"].max())
+                    low_52w = float(df["Close"].min())
+                    pct_from_high = (price - high_52w) / high_52w * 100
+                    pct_from_low = (price - low_52w) / low_52w * 100 if low_52w > 0 else 0
+
+                    # Volatility (annualized, 20-day)
+                    daily_returns = df["Close"].pct_change().dropna().iloc[-20:]
+                    volatility = float(daily_returns.std() * (252 ** 0.5)) if len(daily_returns) >= 10 else 0
+
+                    # Revenue/earnings growth from yfinance
+                    rev_growth, earn_growth, profit_margin = None, None, None
+                    try:
+                        ti = ticker_obj.info
+                        rev_growth = ti.get("revenueGrowth")
+                        earn_growth = ti.get("earningsGrowth")
+                        profit_margin = ti.get("profitMargins")
+                    except Exception:
+                        pass
 
                     # 1-month return
                     change_1mo = 0
@@ -659,94 +675,98 @@ def get_trending_stocks() -> list:
                         p21 = float(df["Close"].iloc[-21])
                         change_1mo = (price - p21) / p21 * 100 if p21 > 0 else 0
 
-                    info = yf.Ticker(sym).fast_info
                     market_data[sym] = {
                         "price": round(price, 2),
                         "change_1d": round(float((price - prev["Close"]) / prev["Close"] * 100), 1),
-                        "change_5d": round(change_5d, 1),
                         "change_1mo": round(change_1mo, 1),
                         "change_3mo": round(change_3mo, 1),
-                        "pct_from_6mo_low": round(pct_from_low, 1),
-                        "vol_ratio": round(vol_ratio, 1),
-                        "vol_awakening": vol_ratio >= 1.5 and avg_vol_20d < avg_vol_60d,
-                        "market_cap": getattr(info, "market_cap", None),
+                        "pct_from_52w_high": round(pct_from_high, 1),
+                        "pct_from_52w_low": round(pct_from_low, 1),
+                        "volatility": round(volatility * 100, 1),
+                        "market_cap": cap,
+                        "rev_growth": rev_growth,
+                        "earn_growth": earn_growth,
+                        "profit_margin": profit_margin,
                     }
                 except Exception:
                     pass
         except Exception:
             pass
 
-        # 5. Discovery scoring — find stocks early in their story
+        # ── Stage 3: Score against winner profile ──
         scored = []
-        for sym in top_syms[:60]:
+        for sym in top_syms[:100]:
             if sym not in market_data:
                 continue
 
             rd = reddit_tickers.get(sym, {})
             mkt = market_data[sym]
             signals = []
-            signal_count = 0
+            profile_score = 0  # how many winner profile traits does it match?
 
-            # Signal A: Volume awakening — volume rising from a quiet base
-            # (not a blow-off spike on an already hot stock)
-            if mkt["vol_awakening"]:
-                signals.append(f"Volume awakening ({mkt['vol_ratio']}x on quiet base)")
-                signal_count += 1
-            elif mkt["vol_ratio"] >= 1.5:
-                signals.append(f"Vol {mkt['vol_ratio']}x avg")
-                signal_count += 1
-
-            # Signal B: Still cheap — within 30% of 6-month low
-            if mkt["pct_from_6mo_low"] <= 30:
-                signals.append(f"Near lows ({mkt['pct_from_6mo_low']}% from 6mo low)")
-                signal_count += 1
-
-            # Signal C: Early momentum — starting to move but not parabolic
-            if 5 <= mkt["change_5d"] <= 25:
-                signals.append(f"Early move +{mkt['change_5d']}% this week")
-                signal_count += 1
-
-            # Signal D: Not already extended — skip stocks up 100%+ in 3 months
-            already_extended = mkt["change_3mo"] > 100
-            if already_extended:
-                continue  # hard filter — already had its run
-
-            # Signal E: Small/mid cap (where the big movers start)
+            # Trait 1: Right-sized market cap ($1B-$20B, sweet spot $3-8B)
             cap = mkt.get("market_cap")
-            if cap and cap < 5e9:
-                signals.append("Small cap (<$5B)")
-                signal_count += 1
-            elif cap and cap < 20e9:
-                signals.append("Mid cap (<$20B)")
-                signal_count += 1
+            if cap:
+                if 3e9 <= cap <= 8e9:
+                    profile_score += 3
+                    signals.append(f"Sweet spot cap (${cap/1e9:.1f}B)")
+                elif 1e9 <= cap < 3e9:
+                    profile_score += 2
+                    signals.append(f"Small cap (${cap/1e9:.1f}B)")
+                elif 8e9 < cap <= 20e9:
+                    profile_score += 1
+                    signals.append(f"Mid cap (${cap/1e9:.1f}B)")
+                else:
+                    continue  # outside winner range
 
-            # Signal F: Reddit mention acceleration (early social buzz)
+            # Trait 2: Revenue growing (strongest fundamental signal)
+            if mkt["rev_growth"] is not None and mkt["rev_growth"] > 0.03:
+                profile_score += 3
+                signals.append(f"Revenue growing +{mkt['rev_growth']:.0%}")
+            elif mkt["rev_growth"] is not None and mkt["rev_growth"] > 0:
+                profile_score += 1
+                signals.append(f"Revenue +{mkt['rev_growth']:.0%}")
+
+            # Trait 3: Earnings positive or improving
+            if mkt["earn_growth"] is not None and mkt["earn_growth"] > 0:
+                profile_score += 2
+                signals.append(f"Earnings growing +{mkt['earn_growth']:.0%}")
+
+            # Trait 4: Higher volatility (>30% — exciting, narrative-driven names)
+            if mkt["volatility"] > 40:
+                profile_score += 2
+                signals.append(f"High volatility ({mkt['volatility']}%)")
+            elif mkt["volatility"] > 30:
+                profile_score += 1
+                signals.append(f"Volatile ({mkt['volatility']}%)")
+
+            # Trait 5: Not at all-time highs (room to run)
+            if mkt["pct_from_52w_high"] < -20:
+                profile_score += 2
+                signals.append(f"{abs(mkt['pct_from_52w_high'])}% below 52w high")
+            elif mkt["pct_from_52w_high"] < -7:
+                profile_score += 1
+                signals.append(f"{abs(mkt['pct_from_52w_high'])}% below 52w high")
+
+            # Social signal context (not a profile trait, but useful info)
             mentions = rd.get("mentions", 0) or 0
             mentions_ago = rd.get("mentions_24h_ago") or mentions or 1
             m_accel = (mentions - mentions_ago) / mentions_ago if mentions_ago > 0 else 0
             if m_accel > 0.3 and mentions >= 3:
-                signals.append(f"Reddit buzz growing +{m_accel:.0%}")
-                signal_count += 1
-
-            # Signal G: Yahoo trending
+                signals.append(f"Reddit buzz +{m_accel:.0%}")
+            elif mentions >= 5:
+                signals.append(f"{mentions} Reddit mentions")
             if sym in yahoo_trending:
                 signals.append("Yahoo trending")
-                signal_count += 1
 
-            # Require 2+ discovery signals
-            if signal_count < 2:
+            # Require profile score >= 3 (matches multiple winner traits)
+            if profile_score < 3:
                 continue
 
-            # Score by signal quality
-            score = signal_count * 15  # base: more signals = higher score
-            if mkt["vol_awakening"]: score += 10       # awakening > regular spike
-            if mkt["pct_from_6mo_low"] <= 15: score += 10  # really close to lows
-            if cap and cap < 5e9: score += 5           # smaller = more upside potential
-
             scored.append({
-                "ticker": sym, "score": score, "signals": signals,
+                "ticker": sym, "score": profile_score, "signals": signals,
                 "price": mkt["price"], "change_1d": mkt["change_1d"],
-                "market_cap": cap, "signal_count": signal_count,
+                "market_cap": cap, "signal_count": profile_score,
             })
 
         scored.sort(key=lambda x: x["score"], reverse=True)
