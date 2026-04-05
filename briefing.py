@@ -750,7 +750,26 @@ def get_trending_stocks() -> list:
             })
 
         scored.sort(key=lambda x: x["score"], reverse=True)
-        return scored[:5]
+        top = scored[:5]
+
+        # Log every flag for out-of-sample tracking
+        if top:
+            import json as _json
+            log_path = Path(__file__).parent / "discovery_log.jsonl"
+            now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            with open(log_path, "a") as f:
+                for t in top:
+                    entry = {
+                        "date": now_utc,
+                        "ticker": t["ticker"],
+                        "score": t["score"],
+                        "price": t["price"],
+                        "signals": t["signals"],
+                        "signal_count": t["signal_count"],
+                    }
+                    f.write(_json.dumps(entry) + "\n")
+
+        return top
 
     except Exception:
         return []
