@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Morning Briefing Bot - Daily briefing with markets, portfolio news, and business ideas."""
+"""Morning Briefing Bot - High-signal daily email: markets, trending repos, one heads-up."""
 import os
 from pathlib import Path
 import argparse
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
@@ -13,13 +13,23 @@ load_dotenv(Path(__file__).parent / ".env")
 
 # API Keys
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-NEWS_API_KEY = os.getenv("NEWS_API_KEY")
 RESEND_API_KEY = os.getenv("RESEND_API_KEY")
 EMAIL_TO = os.getenv("EMAIL_TO")
 
-# NYC coordinates for weather
-NYC_LAT = 40.7128
-NYC_LON = -74.0060
+# Webull API (personal portfolio)
+WEBULL_APP_KEY = os.getenv("WEBULL_APP_KEY")
+WEBULL_APP_SECRET = os.getenv("WEBULL_APP_SECRET")
+WEBULL_ACCOUNT_ID = os.getenv("WEBULL_ACCOUNT_ID")
+
+# Alpaca API — trading bot accounts
+# Paper account (v1/v2 strategies, currently active)
+ALPACA_PAPER_API_KEY = os.getenv("ALPACA_PAPER_API_KEY")
+ALPACA_PAPER_SECRET_KEY = os.getenv("ALPACA_PAPER_SECRET_KEY")
+ALPACA_PAPER_URL = "https://paper-api.alpaca.markets"
+# Live account (v3 market-neutral PEAD)
+ALPACA_V3_API_KEY = os.getenv("ALPACA_V3_API_KEY")
+ALPACA_V3_SECRET_KEY = os.getenv("ALPACA_V3_SECRET_KEY")
+ALPACA_LIVE_URL = "https://api.alpaca.markets"
 
 # Portfolio holdings
 MY_HOLDINGS = [
@@ -27,41 +37,255 @@ MY_HOLDINGS = [
     "META", "TSLA", "NBIS", "ASTS", "GRAB", "HIMS"
 ]
 
+# Target companies for job alerts
+TARGET_ORGS = ["anthropics", "janestreet", "twosigma", "citadel", "deepmind"]
 
-def get_nyc_weather() -> dict:
-    """Get NYC high/low temperature for today using Open-Meteo (free, no API key)."""
+# Repos to watch for new releases
+WATCHED_REPOS = [
+    "anthropics/claude-code",
+    "anthropics/anthropic-sdk-python",
+    "anthropics/courses",
+    "modelcontextprotocol/servers",
+]
+
+
+def _webull_get(path: str, query_params: dict = None):
+    """Make an authenticated GET request to the Webull API."""
+    import hashlib, hmac, base64, uuid, urllib.parse
+
+    if not WEBULL_APP_KEY or not WEBULL_APP_SECRET:
+        return None
+
+    timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.000+00:00')
+    nonce = str(uuid.uuid4())
+    host = 'api.webull.com'
+
+    params = {
+        'host': host,
+        'x-app-key': WEBULL_APP_KEY,
+        'x-signature-algorithm': 'HMAC-SHA1',
+        'x-signature-version': '1.0',
+        'x-signature-nonce': nonce,
+        'x-timestamp': timestamp,
+    }
+    if query_params:
+        params.update(query_params)
+
+    sorted_params = '&'.join(f'{k}={v}' for k, v in sorted(params.items()))
+    sign_string = f'{path}&{sorted_params}'
+    encoded = urllib.parse.quote(sign_string, safe='')
+    secret_key = (WEBULL_APP_SECRET + '&').encode()
+    signature = base64.b64encode(
+        hmac.new(secret_key, encoded.encode(), hashlib.sha1).digest()
+    ).decode()
+
+    headers = {
+        'host': host, 'x-app-key': WEBULL_APP_KEY, 'x-timestamp': timestamp,
+        'x-signature': signature, 'x-signature-algorithm': 'HMAC-SHA1',
+        'x-signature-version': '1.0', 'x-signature-nonce': nonce,
+        'Content-Type': 'application/json',
+    }
+
+    url = f'https://{host}{path}'
+    if query_params:
+        url += '?' + '&'.join(f'{k}={v}' for k, v in query_params.items())
+
+    return requests.get(url, headers=headers, timeout=15)
+
+
+def get_webull_portfolio() -> dict | None:
+    """Get Webull portfolio: previous day's return via position price changes."""
+    if not WEBULL_ACCOUNT_ID:
+        return None
+
     try:
-        resp = requests.get(
-            "https://api.open-meteo.com/v1/forecast",
-            params={
-                "latitude": NYC_LAT,
-                "longitude": NYC_LON,
-                "daily": "temperature_2m_max,temperature_2m_min",
-                "temperature_unit": "fahrenheit",
-                "timezone": "America/New_York",
-                "forecast_days": 1
-            },
-            timeout=10
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-            daily = data.get("daily", {})
-            return {
-                "high": round(daily.get("temperature_2m_max", [None])[0]),
-                "low": round(daily.get("temperature_2m_min", [None])[0])
-            }
+        resp = _webull_get('/account/positions', {
+            'account_id': WEBULL_ACCOUNT_ID, 'page_size': '100',
+        })
+        if not resp or resp.status_code != 200:
+            return None
+
+        data = resp.json()
+        holdings = data if isinstance(data, list) else data.get('holdings', [])
+
+        # Aggregate by symbol, only active positions (market_value > $10)
+        by_symbol = {}
+        for h in holdings:
+            sym = h.get('symbol', '?')
+            mv = float(h.get('market_value', 0))
+            qty = float(h.get('qty', 0))
+            last_price = float(h.get('last_price', 0))
+            if sym not in by_symbol:
+                by_symbol[sym] = {"market_value": 0, "qty": 0, "last_price": last_price}
+            by_symbol[sym]["market_value"] += mv
+            by_symbol[sym]["qty"] += qty
+
+        # Use yfinance to get previous close for daily change
+        import yfinance as yf
+        symbols = [s for s, d in by_symbol.items() if d["market_value"] > 10]
+        daily_changes = []
+        total_day_pnl = 0
+        total_prev_value = 0
+
+        for sym in symbols:
+            try:
+                stock = yf.Ticker(sym)
+                info = stock.fast_info
+                if info.last_price and info.previous_close:
+                    day_chg_pct = ((info.last_price - info.previous_close) / info.previous_close) * 100
+                    qty = by_symbol[sym]["qty"]
+                    day_pnl = (info.last_price - info.previous_close) * qty
+                    prev_val = info.previous_close * qty
+                    total_day_pnl += day_pnl
+                    total_prev_value += prev_val
+                    daily_changes.append({
+                        "symbol": sym,
+                        "price": info.last_price,
+                        "day_pnl": day_pnl,
+                        "day_pct": day_chg_pct,
+                    })
+            except Exception:
+                pass
+
+        # Add market value for sorting
+        for d in daily_changes:
+            d["market_value"] = by_symbol.get(d["symbol"], {}).get("market_value", 0)
+        daily_changes.sort(key=lambda x: x["market_value"], reverse=True)
+        total_day_pct = (total_day_pnl / total_prev_value * 100) if total_prev_value > 0 else 0
+
+        return {
+            "day_pnl": total_day_pnl,
+            "day_pct": total_day_pct,
+            "positions": daily_changes,
+        }
+
     except Exception:
-        pass
-    return {}
+        return None
+
+
+def _fetch_alpaca_account(api_key: str, secret_key: str, base_url: str, label: str) -> dict | None:
+    """Fetch P&L data from a single Alpaca account."""
+    if not api_key or not secret_key:
+        return None
+
+    headers = {"APCA-API-KEY-ID": api_key, "APCA-API-SECRET-KEY": secret_key}
+
+    try:
+        acct_resp = requests.get(f"{base_url}/v2/account", headers=headers, timeout=10)
+        if acct_resp.status_code != 200:
+            return None
+
+        acct = acct_resp.json()
+        equity = float(acct.get("equity", 0))
+        last_equity = float(acct.get("last_equity", 0))
+
+        # Skip empty/unfunded accounts
+        if equity < 1 and last_equity < 1:
+            return None
+
+        # Yesterday's P&L
+        daily_pnl = equity - last_equity if last_equity > 0 else 0
+        daily_pct = (daily_pnl / last_equity) * 100 if last_equity > 0 else 0
+
+        # Total return from portfolio history
+        total_pnl, total_pct = 0, 0
+        hist_resp = requests.get(
+            f"{base_url}/v2/account/portfolio/history",
+            headers=headers, params={"period": "all", "timeframe": "1D"}, timeout=10,
+        )
+        if hist_resp.status_code == 200:
+            hist = hist_resp.json()
+            base_value = hist.get("base_value", 0)
+            if base_value and base_value > 0:
+                total_pnl = equity - base_value
+                total_pct = (total_pnl / base_value) * 100
+
+        # Active positions
+        pos_resp = requests.get(f"{base_url}/v2/positions", headers=headers, timeout=10)
+        positions = []
+        if pos_resp.status_code == 200:
+            for p in pos_resp.json():
+                positions.append({
+                    "symbol": p.get("symbol", ""),
+                    "pnl_pct": float(p.get("unrealized_plpc", 0)) * 100,
+                })
+
+        return {
+            "label": label,
+            "equity": equity,
+            "daily_pnl": daily_pnl,
+            "daily_pct": daily_pct,
+            "total_pnl": total_pnl,
+            "total_pct": total_pct,
+            "positions": positions,
+        }
+
+    except Exception:
+        return None
+
+
+def get_bot_pnl() -> list:
+    """Get P&L from all active Alpaca accounts (paper + live)."""
+    accounts = []
+
+    paper = _fetch_alpaca_account(
+        ALPACA_PAPER_API_KEY, ALPACA_PAPER_SECRET_KEY, ALPACA_PAPER_URL, "Paper (v1/v2)"
+    )
+    if paper:
+        accounts.append(paper)
+
+    live = _fetch_alpaca_account(
+        ALPACA_V3_API_KEY, ALPACA_V3_SECRET_KEY, ALPACA_LIVE_URL, "Live (v3)"
+    )
+    if live:
+        accounts.append(live)
+
+    return accounts
+
+
+def get_earnings_calendar() -> list:
+    """Get upcoming earnings dates for portfolio holdings (next 14 days)."""
+    import yfinance as yf
+
+    earnings = []
+    today = datetime.now()
+    lookahead = today + timedelta(days=14)
+
+    for ticker in MY_HOLDINGS:
+        if ticker in ("SPY", "QQQ"):
+            continue
+        try:
+            stock = yf.Ticker(ticker)
+            cal = stock.calendar
+            if cal and isinstance(cal, dict):
+                earnings_date = cal.get("Earnings Date")
+                if earnings_date:
+                    if isinstance(earnings_date, list) and len(earnings_date) > 0:
+                        earnings_date = earnings_date[0]
+                    if hasattr(earnings_date, 'to_pydatetime'):
+                        earnings_date = earnings_date.to_pydatetime().replace(tzinfo=None)
+                    elif isinstance(earnings_date, str):
+                        earnings_date = datetime.strptime(earnings_date[:10], "%Y-%m-%d")
+                    if today <= earnings_date <= lookahead:
+                        days_away = (earnings_date - today).days
+                        earnings.append({
+                            "ticker": ticker,
+                            "date": earnings_date.strftime("%b %d"),
+                            "days_away": days_away,
+                        })
+        except Exception:
+            pass
+
+    earnings.sort(key=lambda x: x["days_away"])
+    return earnings
 
 
 def get_market_overview() -> dict:
-    """Fetch market data and key economic events."""
+    """Fetch market indices and portfolio holdings."""
     import yfinance as yf
 
-    result = {"indices": {}, "holdings": {}, "events": [], "headlines": []}
+    result = {"indices": {}, "holdings": []}
 
-    # Major indices
     indices = {"S&P": "^GSPC", "Nasdaq": "^IXIC", "Dow": "^DJI"}
     for name, ticker in indices.items():
         try:
@@ -69,360 +293,406 @@ def get_market_overview() -> dict:
             info = idx.fast_info
             if info.last_price and info.previous_close:
                 change_pct = ((info.last_price - info.previous_close) / info.previous_close) * 100
-                result["indices"][name] = change_pct
+                result["indices"][name] = {"price": info.last_price, "change_pct": change_pct}
         except Exception:
             pass
 
-    # User's holdings
     for ticker in MY_HOLDINGS:
         try:
             stock = yf.Ticker(ticker)
             info = stock.fast_info
             if info.last_price and info.previous_close:
                 change_pct = ((info.last_price - info.previous_close) / info.previous_close) * 100
-                result["holdings"][ticker] = change_pct
+                result["holdings"].append({"ticker": ticker, "price": info.last_price, "change_pct": change_pct})
         except Exception:
             pass
 
-    if NEWS_API_KEY:
-        try:
-            resp = requests.get(
-                "https://newsapi.org/v2/top-headlines",
-                params={"apiKey": NEWS_API_KEY, "category": "business", "country": "us", "pageSize": 5},
-                timeout=10
-            )
-            if resp.status_code == 200:
-                articles = resp.json().get("articles", [])
-                result["headlines"] = [a.get("title", "").split(" - ")[0] for a in articles[:3] if a.get("title")]
-        except Exception:
-            pass
-
-    # Check for major earnings today
-    major_tickers = ["AAPL", "MSFT", "GOOGL", "AMZN", "TSLA", "META", "NVDA"]
-    today = datetime.now()
-
-    for ticker in major_tickers:
-        try:
-            stock = yf.Ticker(ticker)
-            cal = stock.calendar
-            if cal and isinstance(cal, dict):
-                earnings_date = cal.get("Earnings Date")
-                if earnings_date:
-                    if isinstance(earnings_date, list):
-                        earnings_date = earnings_date[0]
-                    if hasattr(earnings_date, 'to_pydatetime'):
-                        earnings_date = earnings_date.to_pydatetime().replace(tzinfo=None)
-                    if earnings_date.date() == today.date():
-                        result["events"].append(f"{ticker} earnings")
-        except Exception:
-            pass
-
+    # Sort by absolute change to surface biggest movers
+    result["holdings"].sort(key=lambda x: abs(x["change_pct"]), reverse=True)
     return result
 
 
-def get_portfolio_news() -> list:
-    """Get news for portfolio holdings from the last 24 hours."""
-    if not NEWS_API_KEY:
-        return []
+def _is_junk_repo(repo: dict) -> bool:
+    """Filter out forks, clones, non-English repos, and low-effort projects."""
+    name = (repo.get("name") or "").lower()
+    full_name = (repo.get("full_name") or "").lower()
+    desc = (repo.get("description") or "")
 
-    news_items = []
-    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-    stocks_to_check = [s for s in MY_HOLDINGS if s not in ["SPY", "QQQ"]]
+    # Skip forks
+    if repo.get("fork"):
+        return True
 
-    for symbol in stocks_to_check[:10]:
+    # Skip non-English descriptions (CJK characters dominate)
+    cjk_count = sum(1 for c in desc if '\u4e00' <= c <= '\u9fff' or '\u3040' <= c <= '\u30ff' or '\uac00' <= c <= '\ud7af')
+    if len(desc) > 10 and cjk_count / len(desc) > 0.3:
+        return True
+
+    # Skip obvious clones/copies of existing tools
+    clone_signals = ["clone", "copy", "replica", "unofficial", "mirror", "fork-of", "alternative-to"]
+    if any(s in name for s in clone_signals) or any(s in desc.lower() for s in clone_signals):
+        return True
+
+    # Skip repos with "best" or "awesome" lists (usually aggregators, not tools)
+    if "awesome-" in name or "-best" in full_name:
+        return True
+
+    return False
+
+
+def _add_relevance(repos: list) -> list:
+    """Use Groq to add a 'why you care' line to each repo."""
+    if not GROQ_API_KEY or not repos:
+        return repos
+
+    repo_lines = "\n".join(
+        f"- {r['name']}: {r['description']} ({r['stars']} stars, {r['language']})"
+        for r in repos
+    )
+
+    prompt = f"""For each GitHub repo below, write ONE sentence (max 12 words) explaining what it DOES and why it's useful.
+
+Rules:
+- Say what the tool actually does, not that it "is relevant"
+- Be concrete: "Runs Claude Code sessions in parallel across branches" not "Useful for Claude Code"
+- If a repo is just a clone/copy of an existing tool with no new capability, say "skip"
+- If you can't tell what it does from the description, say "skip"
+
+{repo_lines}
+
+Return ONLY numbered lines. No intro."""
+
+    try:
+        resp = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+            json={"model": "llama-3.3-70b-versatile", "messages": [{"role": "user", "content": prompt}], "max_tokens": 200, "temperature": 0.3},
+            timeout=15,
+        )
+        if resp.status_code == 200:
+            lines = resp.json()["choices"][0]["message"]["content"].strip().split("\n")
+            for i, line in enumerate(lines):
+                if i < len(repos):
+                    cleaned = line.lstrip("0123456789.) ").strip()
+                    if cleaned.lower() != "skip":
+                        repos[i]["why"] = cleaned
+    except Exception:
+        pass
+
+    # Filter out repos marked as "skip"
+    return [r for r in repos if r.get("why")]
+
+
+def get_trending_repos() -> list:
+    """Find high-signal trending repos in AI engineering, Claude, MCP, and quant ML."""
+    repos = []
+    week_ago = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+    seen = set()
+
+    queries = [
+        ("claude code OR claude agent OR MCP server OR anthropic", 50),
+        ("quant trading machine learning OR algorithmic trading python", 100),
+        ("LLM agent framework OR coding agent", 200),
+    ]
+
+    for query, min_stars in queries:
         try:
             resp = requests.get(
-                "https://newsapi.org/v2/everything",
-                params={"apiKey": NEWS_API_KEY, "q": f"{symbol} stock", "from": yesterday, "sortBy": "relevancy", "pageSize": 3, "language": "en"},
-                timeout=10
+                "https://api.github.com/search/repositories",
+                params={
+                    "q": f"{query} created:>{week_ago} stars:>{min_stars}",
+                    "sort": "stars",
+                    "order": "desc",
+                    "per_page": 8,
+                },
+                headers={"Accept": "application/vnd.github+json"},
+                timeout=10,
             )
             if resp.status_code == 200:
-                articles = resp.json().get("articles", [])
-                important_keywords = ["earnings", "upgrade", "downgrade", "analyst", "SEC", "FDA", "lawsuit", "acquire"]
-
-                for article in articles[:2]:
-                    title = article.get("title", "")
-                    url = article.get("url", "")
-                    is_important = any(kw.lower() in title.lower() for kw in important_keywords)
-                    if title:
-                        news_items.append({"symbol": symbol, "title": title.split(" - ")[0], "url": url, "important": is_important})
+                for repo in resp.json().get("items", []):
+                    name = repo["full_name"]
+                    if name not in seen and not _is_junk_repo(repo):
+                        seen.add(name)
+                        repos.append({
+                            "name": name,
+                            "description": (repo.get("description") or "")[:120],
+                            "stars": repo.get("stargazers_count", 0),
+                            "url": repo.get("html_url", ""),
+                            "language": repo.get("language") or "",
+                        })
         except Exception:
             pass
 
-    news_items.sort(key=lambda x: x["important"], reverse=True)
-    return news_items[:8]
-
-
-def get_dev_tools_news() -> list:
-    """Get latest developer tools and AI coding news."""
-    if not NEWS_API_KEY:
-        return []
-
+    # Also catch established repos that surged this week
     try:
-        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-        # Focus on developer tools, coding assistants, automation
         resp = requests.get(
-            "https://newsapi.org/v2/everything",
+            "https://api.github.com/search/repositories",
             params={
-                "apiKey": NEWS_API_KEY,
-                "q": "(Cursor OR \"GitHub Copilot\" OR \"Claude Code\" OR Replit OR Vercel OR Supabase OR \"VS Code\" OR \"coding assistant\") AND (launch OR release OR update OR new)",
-                "from": yesterday,
-                "sortBy": "relevancy",
-                "pageSize": 10,
-                "language": "en"
+                "q": f'(claude OR anthropic OR MCP OR "trading bot" OR "quant") stars:>500 pushed:>{week_ago}',
+                "sort": "updated",
+                "order": "desc",
+                "per_page": 10,
             },
-            timeout=10
+            headers={"Accept": "application/vnd.github+json"},
+            timeout=10,
         )
         if resp.status_code == 200:
-            articles = resp.json().get("articles", [])
-            # Filter out generic articles
-            filtered = []
-            for a in articles:
-                title = a.get("title", "")
-                # Skip generic news
-                if any(skip in title.lower() for skip in ["stock", "shares", "investor", "earnings", "market"]):
-                    continue
-                filtered.append({"title": title.split(" - ")[0], "url": a.get("url", "")})
-                if len(filtered) >= 2:
-                    break
-            return filtered
+            for repo in resp.json().get("items", []):
+                name = repo["full_name"]
+                if name not in seen and not _is_junk_repo(repo):
+                    seen.add(name)
+                    repos.append({
+                        "name": name,
+                        "description": (repo.get("description") or "")[:120],
+                        "stars": repo.get("stargazers_count", 0),
+                        "url": repo.get("html_url", ""),
+                        "language": repo.get("language") or "",
+                    })
     except Exception:
         pass
-    return []
+
+    repos.sort(key=lambda r: r["stars"], reverse=True)
+    # Take top candidates, then filter through LLM for relevance
+    return _add_relevance(repos[:8])[:4]
 
 
-def get_daily_mindset() -> str:
-    """Generate a daily mindset reminder about positive manifestation, self-kindness, and narrative power."""
-    fallback_reminders = [
-        "Your thoughts shape your reality. Instead of 'I don't want to fail,' try 'I am building something meaningful.' What you focus on expands.",
-        "Be gentle with yourself today. The story you tell about who you are becomes the life you live. Write it with compassion.",
-        "Don't run from what you fear—run toward what you want. 'I want to be confident' creates a different future than 'I don't want to be anxious.'",
-        "You are the narrator of your own story. Speak to yourself like someone you love. The narrative you choose becomes your truth.",
-        "Manifestation isn't magic—it's focus. Frame your desires positively: 'I am becoming' rather than 'I hope I'm not.' Your mind follows your words.",
-        "Today's reminder: Be kind to yourself. Your inner dialogue shapes your outer world. Replace 'I shouldn't be this way' with 'I'm growing into who I want to be.'",
-        "The power of narrative: You can't avoid your way to success. Focus on what you're building, not what you're escaping. Your story is what you choose to emphasize.",
-        "Thoughts become beliefs, beliefs become actions. 'I am capable' opens doors that 'I hope I don't mess up' keeps closed. Choose your words wisely.",
-    ]
+def get_heads_up() -> dict | None:
+    """Check for one high-signal alert: new releases from watched repos, or new roles at target companies."""
 
-    if not GROQ_API_KEY:
-        import random
-        return random.choice(fallback_reminders)
+    # 1. Check watched repos for new releases (last 24h)
+    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    for repo in WATCHED_REPOS:
+        try:
+            resp = requests.get(
+                f"https://api.github.com/repos/{repo}/releases",
+                params={"per_page": 1},
+                headers={"Accept": "application/vnd.github+json"},
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                releases = resp.json()
+                if releases:
+                    release = releases[0]
+                    published = release.get("published_at", "")
+                    if published > yesterday:
+                        return {
+                            "type": "release",
+                            "title": f"{repo} {release.get('tag_name', '')}",
+                            "body": (release.get("name") or release.get("body") or "")[:120],
+                            "url": release.get("html_url", ""),
+                        }
+        except Exception:
+            pass
 
+    # 2. Check target orgs for new public repos (signals new projects/tools)
+    for org in TARGET_ORGS:
+        try:
+            resp = requests.get(
+                f"https://api.github.com/orgs/{org}/repos",
+                params={"sort": "created", "direction": "desc", "per_page": 1},
+                headers={"Accept": "application/vnd.github+json"},
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                repos = resp.json()
+                if repos:
+                    repo = repos[0]
+                    created = repo.get("created_at", "")
+                    if created > yesterday:
+                        return {
+                            "type": "new_repo",
+                            "title": f"New repo from {org}: {repo.get('name', '')}",
+                            "body": (repo.get("description") or "")[:120],
+                            "url": repo.get("html_url", ""),
+                        }
+        except Exception:
+            pass
+
+    # 3. Check Hacker News front page for relevant stories
     try:
-        prompt = """Generate ONE brief mindset reminder (2-3 sentences max) for someone starting their day.
-
-The reminder should touch on ONE of these themes:
-- Positive manifestation: frame desires as what you WANT, not what you want to avoid ("I want to be confident" vs "I don't want to be anxious")
-- Self-compassion: speak to yourself kindly, as you would a friend
-- The power of narrative: the story you tell yourself becomes your reality
-
-Make it warm, practical, and grounded—not cheesy or overly spiritual. No hashtags or emojis.
-Return ONLY the reminder text, nothing else."""
-
-        resp = requests.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
-            json={"model": "llama-3.3-70b-versatile", "messages": [{"role": "user", "content": prompt}], "max_tokens": 150, "temperature": 0.9},
-            timeout=15
-        )
-
-        print(f"DEBUG: Groq mindset response status: {resp.status_code}")
-        if resp.status_code != 200:
-            print(f"DEBUG: Groq mindset error: {resp.text}")
-
+        resp = requests.get("https://hacker-news.firebaseio.com/v0/topstories.json", timeout=10)
         if resp.status_code == 200:
-            reminder = resp.json()["choices"][0]["message"]["content"].strip()
-            print(f"DEBUG: Generated mindset: {reminder[:50]}...")
-            if reminder and len(reminder) > 20:
-                return reminder
+            top_ids = resp.json()[:30]
+            keywords = ["anthropic", "claude", "quant", "trading bot", "mcp", "coding agent", "ai agent"]
+            for story_id in top_ids:
+                try:
+                    story = requests.get(
+                        f"https://hacker-news.firebaseio.com/v0/item/{story_id}.json", timeout=5
+                    ).json()
+                    title = (story.get("title") or "").lower()
+                    if any(kw in title for kw in keywords):
+                        return {
+                            "type": "hn",
+                            "title": story.get("title", ""),
+                            "body": f"{story.get('score', 0)} points",
+                            "url": story.get("url") or f"https://news.ycombinator.com/item?id={story_id}",
+                        }
+                except Exception:
+                    pass
+    except Exception:
+        pass
 
-    except Exception as e:
-        print(f"Mindset generation error: {e}")
-        import traceback
-        traceback.print_exc()
-
-    import random
-    return random.choice(fallback_reminders)
-
-
-def generate_business_ideas() -> list:
-    """Generate 5 business ideas using Groq API with Llama."""
-    fallback_ideas = [
-        "Zapier for Etsy sellers: auto-reply to buyer messages and sync inventory to spreadsheets",
-        "AI that writes Airbnb listing descriptions from your property photos in 30 seconds",
-        "Slack bot that summarizes long threads for managers who hate reading channels",
-        "Browser extension for recruiters that auto-drafts personalized LinkedIn outreach",
-        "API that converts podcast episodes into tweet threads for content creators"
-    ]
-
-    if not GROQ_API_KEY:
-        return fallback_ideas
-
-    try:
-        today = datetime.now().strftime("%B %d, %Y")
-        prompt = f"""You are a startup idea generator for a technical founder. Generate 5 hyper-specific, niche business ideas for {today}.
-
-Requirements:
-- Each idea must target a SPECIFIC audience (e.g., "dentists", "Airbnb hosts", "Etsy sellers", not "small businesses")
-- Include the business model (SaaS, marketplace, API, Chrome extension, mobile app)
-- Ideas should solve a real pain point you could validate this week
-- Mix: 2 weekend builds, 2 medium projects, 1 ambitious idea
-- 15-20 words each, detailed enough to start building tomorrow
-
-BAD example: "AI tool for businesses" (too vague)
-GOOD example: "Chrome extension that auto-generates product descriptions for Etsy sellers using their photos"
-
-Return ONLY 5 numbered lines. No intro."""
-
-        resp = requests.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
-            json={"model": "llama-3.3-70b-versatile", "messages": [{"role": "user", "content": prompt}], "max_tokens": 300, "temperature": 0.8},
-            timeout=30
-        )
-
-        print(f"DEBUG: Groq ideas response status: {resp.status_code}")
-        if resp.status_code != 200:
-            print(f"DEBUG: Groq ideas error: {resp.text}")
-
-        if resp.status_code == 200:
-            response_text = resp.json()["choices"][0]["message"]["content"]
-            ideas = []
-            for line in response_text.strip().split("\n"):
-                line = line.strip()
-                if line and line[0].isdigit():
-                    idea = line.lstrip("0123456789.").strip()
-                    if idea:
-                        ideas.append(idea)
-            return ideas[:5] if ideas else fallback_ideas
-
-    except Exception as e:
-        print(f"Groq error: {e}")
-
-    return fallback_ideas
+    return None
 
 
 def format_html_briefing() -> str:
-    """Build HTML email briefing."""
+    """Build lean HTML email briefing."""
     et = ZoneInfo("America/New_York")
     now = datetime.now(et)
     date_str = now.strftime("%A, %B %d")
 
-    weather = get_nyc_weather()
-    mindset = get_daily_mindset()
     market = get_market_overview()
-    dev_news = get_dev_tools_news()
-    portfolio_news = get_portfolio_news()
-    ideas = generate_business_ideas()
+    webull = get_webull_portfolio()
+    bots = get_bot_pnl()
+    earnings = get_earnings_calendar()
+    repos = get_trending_repos()
+    heads_up = get_heads_up()
 
-    # Weather string
-    weather_str = ""
-    if weather.get("high") and weather.get("low"):
-        weather_str = f'<span style="color:#6b7280;font-size:14px;margin-left:12px">NYC: {weather["high"]}°/{weather["low"]}°F</span>'
-
-    # Build indices row (horizontal)
-    indices_html = ""
-    for name, pct in market.get("indices", {}).items():
-        color = "#22c55e" if pct >= 0 else "#ef4444"
-        arrow = "▲" if pct >= 0 else "▼"
-        indices_html += f'<span style="margin-right:16px"><span style="color:#666">{name}</span> <span style="color:{color};font-weight:600">{arrow}{abs(pct):.1f}%</span></span>'
-
-    # Build holdings grid (your stocks)
+    # --- Portfolio holdings (Webull positions with daily P&L, sorted by market value) ---
     holdings_html = ""
-    holdings = market.get("holdings", {})
-    for ticker, pct in holdings.items():
-        color = "#22c55e" if pct >= 0 else "#ef4444"
-        arrow = "▲" if pct >= 0 else "▼"
-        holdings_html += f'<div style="display:inline-block;width:70px;margin:4px 8px 4px 0"><span style="color:#374151;font-weight:500">{ticker}</span><br><span style="color:{color};font-size:13px">{arrow}{abs(pct):.1f}%</span></div>'
+    if webull:
+        for p in webull["positions"]:
+            pc = "#22c55e" if p["day_pnl"] >= 0 else "#ef4444"
+            arrow = "▲" if p["day_pnl"] >= 0 else "▼"
+            ps = "+" if p["day_pnl"] >= 0 else ""
+            holdings_html += (
+                f'<div style="display:inline-block;width:80px;margin:3px 6px;text-align:center">'
+                f'<div style="font-weight:600;color:#374151;font-size:13px">{p["symbol"]}</div>'
+                f'<div style="color:{pc};font-size:12px">{arrow}{abs(p["day_pct"]):.1f}%</div>'
+                f'<div style="color:{pc};font-size:11px">{ps}${p["day_pnl"]:,.0f}</div>'
+                f'</div>'
+            )
+    else:
+        for h in market.get("holdings", []):
+            pct = h["change_pct"]
+            color = "#22c55e" if pct >= 0 else "#ef4444"
+            arrow = "▲" if pct >= 0 else "▼"
+            holdings_html += (
+                f'<div style="display:inline-block;width:80px;margin:3px 6px;text-align:center">'
+                f'<div style="font-weight:600;color:#374151;font-size:13px">{h["ticker"]}</div>'
+                f'<div style="color:{color};font-size:12px">{arrow}{abs(pct):.1f}%</div>'
+                f'</div>'
+            )
 
-    events_html = ""
-    if market.get("events"):
-        events_html = f'<p style="margin:8px 0 0 0;color:#666;font-size:13px">📅 {", ".join(market["events"][:2])}</p>'
+    # --- Heads up (single item, if any) ---
+    heads_up_html = ""
+    if heads_up:
+        type_labels = {"release": "🚀 New Release", "new_repo": "✨ New Repo", "hn": "🔶 On HN"}
+        label = type_labels.get(heads_up["type"], "📌 Heads Up")
+        heads_up_html = (
+            f'<div style="margin-bottom:20px;padding:14px;background:#fef3c7;border-radius:8px;'
+            f'border-left:4px solid #f59e0b">'
+            f'<div style="font-size:11px;color:#92400e;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">{label}</div>'
+            f'<a href="{heads_up["url"]}" style="color:#1d4ed8;font-weight:600;text-decoration:none;font-size:14px">'
+            f'{heads_up["title"]}</a>'
+        )
+        if heads_up["body"]:
+            heads_up_html += f'<p style="margin:4px 0 0 0;color:#78350f;font-size:13px">{heads_up["body"]}</p>'
+        heads_up_html += '</div>'
 
-    # Dev tools news section
-    dev_html = ""
-    for item in dev_news[:2]:
-        title = item["title"] if isinstance(item, dict) else item
-        url = item.get("url", "") if isinstance(item, dict) else ""
-        if len(title) > 70:
-            title = title[:67] + "..."
-        if url:
-            dev_html += f'<li style="margin-bottom:8px"><a href="{url}" style="color:#2563eb;text-decoration:none">{title}</a></li>'
-        else:
-            dev_html += f'<li style="margin-bottom:8px;color:#374151">{title}</li>'
-    if not dev_html:
-        dev_html = '<li style="color:#9ca3af">No dev tool updates today</li>'
+    # --- Bot P&L ---
+    bot_html = ""
+    for bot in bots:
+        d_color = "#22c55e" if bot["daily_pnl"] >= 0 else "#ef4444"
+        t_color = "#22c55e" if bot["total_pnl"] >= 0 else "#ef4444"
+        d_sign = "+" if bot["daily_pnl"] >= 0 else ""
+        t_sign = "+" if bot["total_pnl"] >= 0 else ""
+        pos_count = len(bot["positions"])
+        pos_str = ""
+        if bot["positions"]:
+            pos_parts = []
+            for p in bot["positions"][:5]:
+                pc = "#22c55e" if p["pnl_pct"] >= 0 else "#ef4444"
+                ps = "+" if p["pnl_pct"] >= 0 else ""
+                pos_parts.append(f'<span style="color:{pc};font-size:12px">{p["symbol"]} {ps}{p["pnl_pct"]:.1f}%</span>')
+            pos_str = f'<div style="margin-top:10px;padding-top:10px;border-top:1px solid rgba(0,0,0,0.06)">{" &nbsp;·&nbsp; ".join(pos_parts)}</div>'
+        bot_html += (
+            f'<div style="margin-bottom:12px;padding:16px;background:linear-gradient(135deg,#f0fdf4 0%,#dcfce7 100%);'
+            f'border-radius:8px;border-left:4px solid #10b981">'
+            f'<h2 style="margin:0 0 14px 0;font-size:12px;color:#6b7280;text-transform:uppercase;letter-spacing:0.5px">'
+            f'Trading Bot — {bot["label"]}</h2>'
+            f'<table style="width:100%;border-collapse:collapse"><tr>'
+            f'<td style="text-align:center;padding:0 8px;width:33%">'
+            f'<div style="color:#64748b;font-size:11px;margin-bottom:4px">Yesterday</div>'
+            f'<div style="font-size:18px;font-weight:700;color:{d_color}">{d_sign}${bot["daily_pnl"]:,.0f}</div>'
+            f'<div style="color:{d_color};font-size:12px">{d_sign}{bot["daily_pct"]:.1f}%</div></td>'
+            f'<td style="text-align:center;padding:0 8px;width:33%;border-left:1px solid rgba(0,0,0,0.06);border-right:1px solid rgba(0,0,0,0.06)">'
+            f'<div style="color:#64748b;font-size:11px;margin-bottom:4px">Total Return</div>'
+            f'<div style="font-size:18px;font-weight:700;color:{t_color}">{t_sign}${bot["total_pnl"]:,.0f}</div>'
+            f'<div style="color:{t_color};font-size:12px">{t_sign}{bot["total_pct"]:.1f}%</div></td>'
+            f'<td style="text-align:center;padding:0 8px;width:33%">'
+            f'<div style="color:#64748b;font-size:11px;margin-bottom:4px">Positions</div>'
+            f'<div style="font-size:18px;font-weight:700;color:#1e293b">{pos_count}</div></td>'
+            f'</tr></table>{pos_str}</div>'
+        )
 
-    # Portfolio section
-    portfolio_html = ""
-    seen = set()
-    for item in portfolio_news:
-        if item["symbol"] not in seen:
-            title = item["title"]
-            url = item.get("url", "")
-            if len(title) > 50:
-                title = title[:47] + "..."
-            flag = "🔔 " if item["important"] else ""
-            if url:
-                portfolio_html += f'<li style="margin-bottom:8px"><strong>{item["symbol"]}</strong>: {flag}<a href="{url}" style="color:#2563eb;text-decoration:none">{title}</a></li>'
-            else:
-                portfolio_html += f'<li style="margin-bottom:8px"><strong>{item["symbol"]}</strong>: {flag}{title}</li>'
-            seen.add(item["symbol"])
-            if len(seen) >= 4:
-                break
-    if not portfolio_html:
-        portfolio_html = '<li style="color:#9ca3af">No significant news for your holdings</li>'
+    # --- Earnings calendar ---
+    earnings_html = ""
+    if earnings:
+        items = ""
+        for e in earnings:
+            urgency = "🔴" if e["days_away"] <= 1 else "🟡" if e["days_away"] <= 3 else "⚪"
+            items += (
+                f'<span style="display:inline-block;margin:3px 10px 3px 0;padding:4px 10px;'
+                f'background:#f8fafc;border-radius:4px;font-size:13px">'
+                f'{urgency} <strong>{e["ticker"]}</strong> {e["date"]}</span>'
+            )
+        earnings_html = (
+            f'<div style="margin-bottom:18px">'
+            f'<h2 style="margin:0 0 8px 0;font-size:12px;color:#6b7280;text-transform:uppercase;letter-spacing:0.5px">Earnings Soon</h2>'
+            f'{items}</div>'
+        )
 
-    # Ideas section (no truncation)
-    ideas_html = ""
-    for i, idea in enumerate(ideas, 1):
-        ideas_html += f'<li style="margin-bottom:8px">{idea}</li>'
+    # --- Trending repos ---
+    repos_html = ""
+    for repo in repos:
+        stars_str = f"⭐ {repo['stars']:,}" if repo["stars"] else ""
+        lang_str = f' · {repo["language"]}' if repo["language"] else ""
+        why = repo.get("why", repo["description"])
+        repos_html += (
+            f'<div style="margin-bottom:10px;padding:10px 12px;background:#f0f9ff;border-radius:6px;'
+            f'border-left:3px solid #3b82f6">'
+            f'<a href="{repo["url"]}" style="color:#1d4ed8;font-weight:600;text-decoration:none;font-size:13px">'
+            f'{repo["name"]}</a>'
+            f'<span style="color:#6b7280;font-size:11px;margin-left:8px">{stars_str}{lang_str}</span>'
+            f'<p style="margin:3px 0 0 0;color:#374151;font-size:12px;line-height:1.4">{why}</p>'
+            f'</div>'
+        )
+    if not repos_html:
+        repos_html = '<p style="color:#9ca3af;font-size:13px">Nothing notable this week</p>'
 
-    html = f"""
-<!DOCTYPE html>
+    html = f"""<!DOCTYPE html>
 <html>
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
-<body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:500px;margin:0 auto;padding:20px;background:#f9fafb">
-  <div style="background:white;border-radius:12px;padding:24px;box-shadow:0 1px 3px rgba(0,0,0,0.1)">
-    <h1 style="margin:0 0 20px 0;font-size:20px;color:#111">☀️ {date_str}{weather_str}</h1>
+<body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:480px;margin:0 auto;padding:16px;background:#f9fafb">
+  <div style="background:white;border-radius:12px;padding:20px;box-shadow:0 1px 3px rgba(0,0,0,0.1)">
+    <h1 style="margin:0 0 16px 0;font-size:18px;color:#111">☀️ {date_str}</h1>
 
-    <div style="margin-bottom:20px;padding:16px;background:linear-gradient(135deg,#fef3c7 0%,#fde68a 100%);border-radius:8px;border-left:4px solid #f59e0b">
-      <p style="margin:0;font-size:14px;color:#78350f;line-height:1.6;font-style:italic">{mindset}</p>
+    {heads_up_html}
+
+    <div style="margin-bottom:18px">
+      <h2 style="margin:0 0 8px 0;font-size:12px;color:#6b7280;text-transform:uppercase;letter-spacing:0.5px">Portfolio — Last Trading Day</h2>
+      <div>{holdings_html}</div>
     </div>
 
-    <div style="margin-bottom:20px">
-      <h2 style="margin:0 0 10px 0;font-size:14px;color:#6b7280;text-transform:uppercase;letter-spacing:0.5px">Markets</h2>
-      <div style="font-size:14px;margin-bottom:10px">{indices_html}</div>
-      <div style="margin-top:8px">{holdings_html}</div>
-      {events_html}
-    </div>
+    {bot_html}
 
-    <div style="margin-bottom:20px">
-      <h2 style="margin:0 0 10px 0;font-size:14px;color:#6b7280;text-transform:uppercase;letter-spacing:0.5px">🛠️ Dev Tools</h2>
-      <ul style="margin:0;padding-left:20px;font-size:14px">{dev_html}</ul>
-    </div>
-
-    <div style="margin-bottom:20px">
-      <h2 style="margin:0 0 10px 0;font-size:14px;color:#6b7280;text-transform:uppercase;letter-spacing:0.5px">📊 Your Stocks</h2>
-      <ul style="margin:0;padding-left:20px;font-size:14px">{portfolio_html}</ul>
-    </div>
+    {earnings_html}
 
     <div>
-      <h2 style="margin:0 0 10px 0;font-size:14px;color:#6b7280;text-transform:uppercase;letter-spacing:0.5px">💡 Ideas</h2>
-      <ol style="margin:0;padding-left:20px;font-size:14px">{ideas_html}</ol>
+      <h2 style="margin:0 0 8px 0;font-size:12px;color:#6b7280;text-transform:uppercase;letter-spacing:0.5px">Trending Repos</h2>
+      {repos_html}
     </div>
   </div>
-  <p style="text-align:center;color:#9ca3af;font-size:12px;margin-top:16px">Delivered by Morning Briefing Bot</p>
+  <p style="text-align:center;color:#9ca3af;font-size:11px;margin-top:12px">Morning Briefing</p>
 </body>
-</html>
-"""
+</html>"""
     return html
 
 
 def send_email(html: str, subject: str):
     """Send email via Resend API."""
     if not RESEND_API_KEY or not EMAIL_TO:
-        print("❌ Missing RESEND_API_KEY or EMAIL_TO")
+        print("Missing RESEND_API_KEY or EMAIL_TO")
         return False
 
     try:
@@ -438,22 +708,8 @@ def send_email(html: str, subject: str):
             timeout=15
         )
 
-        print(f"DEBUG: Resend response status: {resp.status_code}")
-        print(f"DEBUG: Resend response body: {resp.text}")
-        print(f"DEBUG: Sending to: {EMAIL_TO}")
-
         if resp.status_code == 200:
-            email_id = resp.json().get("id")
             print(f"✅ Email sent to {EMAIL_TO}")
-            # Check delivery status
-            import time
-            time.sleep(3)
-            status_resp = requests.get(
-                f"https://api.resend.com/emails/{email_id}",
-                headers={"Authorization": f"Bearer {RESEND_API_KEY}"},
-                timeout=10
-            )
-            print(f"DEBUG: Email status check: {status_resp.status_code} - {status_resp.text}")
             return True
         else:
             print(f"❌ Resend error: {resp.status_code} - {resp.text}")
@@ -473,39 +729,58 @@ def main():
     print("☀️ Building morning briefing...\n")
 
     if args.test or not args.send:
-        # Show text preview
-        mindset = get_daily_mindset()
         market = get_market_overview()
-        dev_news = get_dev_tools_news()
-        portfolio_news = get_portfolio_news()
-        ideas = generate_business_ideas()
+        webull = get_webull_portfolio()
+        bots = get_bot_pnl()
+        earnings = get_earnings_calendar()
+        repos = get_trending_repos()
+        heads_up = get_heads_up()
 
         print("=" * 50)
-        print("MINDSET")
-        print(f"  {mindset}")
-        print("\nMARKETS")
-        for name, pct in market.get("futures", {}).items():
-            arrow = "▲" if pct >= 0 else "▼"
-            print(f"  {name}: {arrow} {abs(pct):.1f}%")
-        print("\nDEV TOOLS")
-        for item in dev_news[:2]:
-            title = item["title"] if isinstance(item, dict) else item
-            print(f"  • {title[:60]}...")
-        print("\nYOUR STOCKS")
-        seen = set()
-        for item in portfolio_news[:4]:
-            if item["symbol"] not in seen:
-                print(f"  {item['symbol']}: {item['title'][:45]}...")
-                seen.add(item["symbol"])
-        print("\nIDEAS")
-        for i, idea in enumerate(ideas, 1):
-            print(f"  {i}. {idea[:60]}...")
+        if heads_up:
+            print(f"⚡ HEADS UP: {heads_up['title']}")
+            if heads_up["body"]:
+                print(f"  {heads_up['body']}")
+            print()
+
+        print("PORTFOLIO — LAST TRADING DAY")
+        if webull:
+            d_sign = "+" if webull["day_pnl"] >= 0 else ""
+            print(f"  Total: {d_sign}${webull['day_pnl']:,.0f} ({d_sign}{webull['day_pct']:.1f}%)")
+            for p in webull["positions"][:6]:
+                ps = "+" if p["day_pnl"] >= 0 else ""
+                print(f"  {p['symbol']}: {ps}${p['day_pnl']:,.0f} ({ps}{p['day_pct']:.1f}%)")
+        print()
+
+        for bot in bots:
+            d_sign = "+" if bot["daily_pnl"] >= 0 else ""
+            t_sign = "+" if bot["total_pnl"] >= 0 else ""
+            print(f"BOT — {bot['label']}")
+            print(f"  Yesterday: {d_sign}${bot['daily_pnl']:,.0f} ({d_sign}{bot['daily_pct']:.1f}%)")
+            print(f"  Total:     {t_sign}${bot['total_pnl']:,.0f} ({t_sign}{bot['total_pct']:.1f}%)")
+            if bot["positions"]:
+                pos_str = ", ".join(f"{p['symbol']} {'+' if p['pnl_pct']>=0 else ''}{p['pnl_pct']:.1f}%" for p in bot["positions"][:5])
+                print(f"  Positions: {pos_str}")
+            else:
+                print(f"  Positions: 0")
+            print()
+
+        if earnings:
+            print("EARNINGS SOON")
+            for e in earnings:
+                print(f"  {e['ticker']}: {e['date']} ({e['days_away']}d)")
+            print()
+
+        print("REPOS")
+        for r in repos:
+            why = r.get("why", r["description"][:60])
+            print(f"  ⭐{r['stars']:,} {r['name']} — {why}")
         print("=" * 50)
 
     if args.send:
         et = ZoneInfo("America/New_York")
         now = datetime.now(et)
-        subject = f"☀️ Morning Briefing - {now.strftime('%b %d')}"
+        subject = f"☀️ {now.strftime('%b %d')} — Markets + Repos"
         html = format_html_briefing()
         send_email(html, subject)
 
