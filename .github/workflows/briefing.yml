@@ -1,11 +1,11 @@
 name: Daily Briefings
 
 on:
-  # schedule:
-  #   # Morning: 8am EST = 13:00 UTC (standard time)
-  #   - cron: '0 13 * * *'
-  #   # Afternoon: 4:15pm EST = 21:15 UTC (standard time)
-  #   - cron: '15 21 * * 1-5'  # Weekdays only (Mon-Fri)
+  schedule:
+    # Morning: 8am ET = 12:00 UTC (EDT)
+    - cron: '0 12 * * *'
+    # Afternoon: 4:15pm ET = 20:15 UTC (EDT), weekdays only
+    - cron: '15 20 * * 1-5'
   workflow_dispatch:
     inputs:
       briefing_type:
@@ -21,7 +21,7 @@ on:
 jobs:
   morning-briefing:
     runs-on: ubuntu-latest
-    if: github.event.schedule == '0 13 * * *' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.briefing_type == 'morning' || github.event.inputs.briefing_type == 'both'))
+    if: github.event.schedule == '0 12 * * *' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.briefing_type == 'morning' || github.event.inputs.briefing_type == 'both'))
 
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -44,7 +44,7 @@ jobs:
 
   afternoon-briefing:
     runs-on: ubuntu-latest
-    if: github.event.schedule == '15 21 * * 1-5' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.briefing_type == 'afternoon' || github.event.inputs.briefing_type == 'both'))
+    if: github.event.schedule == '15 20 * * 1-5' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.briefing_type == 'afternoon' || github.event.inputs.briefing_type == 'both'))
 
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
